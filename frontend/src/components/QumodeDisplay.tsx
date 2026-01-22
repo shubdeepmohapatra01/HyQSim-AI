@@ -23,6 +23,8 @@ export default function QumodeDisplay({
   const fockProbabilities = state?.fockProbabilities ?? createVacuumProbabilities(fockTruncation);
   const fockAmplitudes = state?.fockAmplitudes ?? createVacuumAmplitudes(fockTruncation);
   const meanPhotonNumber = state?.meanPhotonNumber ?? 0;
+  const precomputedWigner = state?.wignerData;
+  const wignerRange = state?.wignerRange ?? 5;
 
   // Generate Wigner function from state
   useEffect(() => {
@@ -32,11 +34,22 @@ export default function QumodeDisplay({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const size = 80; // Grid size for computation
-    const range = 4; // Phase space range: -4 to 4
+    // Use pre-computed Wigner from Python backend if available, otherwise compute locally
+    let wigner: number[][];
+    let range: number;
 
-    // Compute Wigner function
-    const wigner = computeWignerFunction(fockAmplitudes, size, range);
+    if (precomputedWigner && precomputedWigner.length > 0) {
+      // Use pre-computed Wigner from backend (computed from full density matrix)
+      wigner = precomputedWigner;
+      range = wignerRange;
+    } else {
+      // Fall back to local computation (only accurate for pure states)
+      const size = 80;
+      range = 4;
+      wigner = computeWignerFunction(fockAmplitudes, size, range);
+    }
+
+    const size = wigner.length;
 
     // Find min/max for color scaling
     let minVal = Infinity, maxVal = -Infinity;
@@ -90,7 +103,7 @@ export default function QumodeDisplay({
     ctx.moveTo(0, canvas.height / 2);
     ctx.lineTo(canvas.width, canvas.height / 2);
     ctx.stroke();
-  }, [mode, fockAmplitudes, fockTruncation]);
+  }, [mode, fockAmplitudes, fockTruncation, precomputedWigner, wignerRange]);
 
   // Find max probability for scaling
   const maxProb = Math.max(...fockProbabilities.slice(0, fockTruncation), 0.001);
@@ -194,14 +207,14 @@ export default function QumodeDisplay({
           />
           {/* Axis labels */}
           <div className="flex justify-between text-[9px] text-slate-400 mt-1 px-1">
-            <span>-{4}</span>
+            <span>-{wignerRange}</span>
             <span>x (position)</span>
-            <span>+{4}</span>
+            <span>+{wignerRange}</span>
           </div>
           <div className="absolute left-1 top-2 h-[140px] flex flex-col justify-between text-[9px] text-slate-400">
-            <span>+{4}</span>
+            <span>+{wignerRange}</span>
             <span className="writing-mode-vertical text-[8px]">p</span>
-            <span>-{4}</span>
+            <span>-{wignerRange}</span>
           </div>
           {/* Color legend */}
           <div className="flex justify-center gap-3 mt-2 text-[9px]">

@@ -15,7 +15,8 @@ try:
     from bosonic_qiskit import CVCircuit, QumodeRegister
     from bosonic_qiskit.util import simulate, trace_out_qubits, trace_out_qumodes
     from qiskit import QuantumRegister
-    from qiskit.quantum_info import Statevector, partial_trace
+    from qiskit.quantum_info import Statevector, partial_trace, DensityMatrix
+    import qutip
     HAS_BOSONIC = True
 except ImportError:
     HAS_BOSONIC = False
@@ -69,6 +70,71 @@ def validate_request(request: SimulationRequest) -> tuple[bool, str]:
             return False, f"Gate '{gate_id}' is not supported by bosonic-qiskit backend."
 
     return True, ""
+
+
+def apply_post_selection(
+    statevector: Statevector,
+    circuit: CVCircuit,
+    post_selections: list,
+    wire_to_qubit_idx: dict[int, int],
+    num_qubits_per_qumode: int
+) -> Statevector:
+    """
+    Apply post-selection on qubit measurement outcomes.
+
+    Projects the statevector onto the subspace where specified qubits
+    have the desired measurement outcomes, then normalizes.
+
+    Args:
+        statevector: Full system statevector
+        circuit: The CVCircuit
+        post_selections: List of QubitPostSelection objects
+        wire_to_qubit_idx: Mapping from wire index to qubit register index
+        num_qubits_per_qumode: Number of qubits encoding each qumode
+
+    Returns:
+        Projected and normalized statevector
+    """
+    sv_array = np.array(statevector.data)
+    num_total_qubits = circuit.num_qubits
+
+    # For each post-selection, project onto the desired outcome
+    for ps in post_selections:
+        wire_idx = ps.wireIndex
+        outcome = ps.outcome
+
+        if wire_idx not in wire_to_qubit_idx:
+            continue
+
+        qubit_idx = wire_to_qubit_idx[wire_idx]
+
+        # In bosonic-qiskit, the qubit register comes after the qumode qubits
+        # The qubit index in the circuit is: num_qumode_qubits + qubit_idx
+        num_qumode_qubits = len(circuit.qubits) - len(wire_to_qubit_idx)
+        actual_qubit_idx = num_qumode_qubits + qubit_idx
+
+        # Project onto |outcome⟩ for this qubit
+        # The statevector has 2^n components, indexed in little-endian order
+        # Qubit at position k contributes 2^k to the index
+        new_sv = np.zeros_like(sv_array)
+
+        for i in range(len(sv_array)):
+            # Check if qubit at actual_qubit_idx has the desired outcome
+            qubit_val = (i >> actual_qubit_idx) & 1
+            if qubit_val == outcome:
+                new_sv[i] = sv_array[i]
+
+        sv_array = new_sv
+
+    # Normalize
+    norm = np.linalg.norm(sv_array)
+    if norm > 1e-10:
+        sv_array = sv_array / norm
+    else:
+        # Post-selection failed (probability ~0), return original
+        return statevector
+
+    return Statevector(sv_array)
 
 
 def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
@@ -265,12 +331,19 @@ def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
         qumode_states = {}
 
         if statevector is not None:
+            # Apply post-selection if requested
+            if request.postSelections and len(request.postSelections) > 0:
+                statevector = apply_post_selection(
+                    statevector, circuit, request.postSelections,
+                    wire_to_qubit_idx, num_qubits_per_qumode
+                )
+
             # Extract qumode states
             qumode_states = extract_qumode_states_from_statevector(
                 statevector, circuit, wire_to_qumode_idx, request.fockTruncation
             )
 
-            # Extract qubit states
+            # Extract qubit states (after post-selection, these will be definite)
             if num_qubits > 0:
                 qubit_states = extract_qubit_states_from_statevector(
                     statevector, circuit, wire_to_qubit_idx
@@ -302,7 +375,7 @@ def extract_qumode_states_from_statevector(
     wire_to_qumode_idx: dict[int, int],
     fock_truncation: int
 ) -> dict[int, QumodeState]:
-    """Extract qumode Fock state probabilities from the statevector."""
+    """Extract qumode states and compute Wigner function from the statevector."""
     states = {}
 
     for wire_idx, qumode_idx in wire_to_qumode_idx.items():
@@ -318,37 +391,92 @@ def extract_qumode_states_from_statevector(
 
             if qubits_to_trace:
                 reduced_dm = partial_trace(statevector, qubits_to_trace)
-                probs = np.real(np.diag(reduced_dm.data))
+                dm_array = reduced_dm.data
+                probs = np.real(np.diag(dm_array))
             else:
                 # No qubits to trace out, statevector is for single qumode
-                probs = np.abs(np.array(statevector.data)) ** 2
+                sv_array = np.array(statevector.data)
+                dm_array = np.outer(sv_array, np.conj(sv_array))
+                probs = np.abs(sv_array) ** 2
 
             # Ensure we have the right number of Fock states
             fock_probs = np.zeros(fock_truncation)
             fock_probs[:min(len(probs), fock_truncation)] = probs[:fock_truncation]
 
-            # Calculate amplitudes (approximate from probabilities)
+            # Extract amplitudes with proper phase from density matrix diagonal
+            # For mixed states, we use sqrt(prob) but this loses phase info
+            # The Wigner function will be computed from the full density matrix
             fock_amps = [ComplexNumber(re=np.sqrt(p), im=0) for p in fock_probs]
 
             # Mean photon number
             mean_n = sum(n * p for n, p in enumerate(fock_probs))
 
+            # Compute Wigner function using qutip
+            wigner_data, wigner_range = compute_wigner_from_density_matrix(
+                dm_array, fock_truncation
+            )
+
             states[wire_idx] = QumodeState(
                 fockAmplitudes=fock_amps,
                 fockProbabilities=fock_probs.tolist(),
-                meanPhotonNumber=float(mean_n)
+                meanPhotonNumber=float(mean_n),
+                wignerData=wigner_data,
+                wignerRange=wigner_range
             )
         except Exception as e:
+            import traceback
+            print(f"Error extracting qumode state: {e}\n{traceback.format_exc()}")
             # Fallback to vacuum state
             fock_probs = [1.0] + [0.0] * (fock_truncation - 1)
             fock_amps = [ComplexNumber(re=1.0, im=0.0)] + [ComplexNumber(re=0.0, im=0.0)] * (fock_truncation - 1)
             states[wire_idx] = QumodeState(
                 fockAmplitudes=fock_amps,
                 fockProbabilities=fock_probs,
-                meanPhotonNumber=0.0
+                meanPhotonNumber=0.0,
+                wignerData=None,
+                wignerRange=None
             )
 
     return states
+
+
+def compute_wigner_from_density_matrix(
+    dm_array: np.ndarray,
+    fock_truncation: int,
+    grid_size: int = 80,
+    x_range: float = 5.0
+) -> tuple[list[list[float]], float]:
+    """
+    Compute Wigner function from density matrix using qutip.
+
+    Args:
+        dm_array: Density matrix as numpy array
+        fock_truncation: Fock space truncation
+        grid_size: Size of the Wigner function grid
+        x_range: Range of phase space coordinates (-x_range to +x_range)
+
+    Returns:
+        Tuple of (wigner_data as 2D list, x_range)
+    """
+    # Ensure density matrix is the right size
+    dm_size = min(dm_array.shape[0], fock_truncation)
+    dm_truncated = dm_array[:dm_size, :dm_size]
+
+    # Create qutip density matrix
+    rho = qutip.Qobj(dm_truncated, dims=[[dm_size], [dm_size]])
+
+    # Compute Wigner function
+    xvec = np.linspace(-x_range, x_range, grid_size)
+    W = qutip.wigner(rho, xvec, xvec)
+
+    # Transpose: qutip returns W[x_idx, p_idx], but frontend expects W[p_idx, x_idx]
+    # for proper display with x horizontal and p vertical
+    W_transposed = W.T
+
+    # Convert to list for JSON serialization
+    wigner_data = W_transposed.tolist()
+
+    return wigner_data, x_range
 
 
 def extract_qubit_states_from_statevector(

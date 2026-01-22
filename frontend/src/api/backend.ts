@@ -2,7 +2,7 @@
  * API client for HyQSim Python backend.
  */
 
-import type { Wire, CircuitElement, SimulationResult, QubitState, QumodeState } from '../types/circuit';
+import type { Wire, CircuitElement, SimulationResult, QubitState, QumodeState, QubitPostSelection } from '../types/circuit';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
@@ -56,7 +56,8 @@ export async function checkBackendHealth(): Promise<{
 export async function runBackendSimulation(
   wires: Wire[],
   elements: CircuitElement[],
-  fockTruncation: number
+  fockTruncation: number,
+  postSelections?: QubitPostSelection[]
 ): Promise<SimulationResult> {
   const response = await fetch(`${BACKEND_URL}/simulate`, {
     method: 'POST',
@@ -76,6 +77,7 @@ export async function runBackendSimulation(
         parameterValues: e.parameterValues,
       })),
       fockTruncation,
+      postSelections: postSelections ?? null,
     }),
   });
 

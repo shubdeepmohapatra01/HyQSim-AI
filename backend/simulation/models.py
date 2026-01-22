@@ -30,10 +30,17 @@ class CircuitElement(BaseModel):
     parameterValues: Optional[dict[str, float]] = None
 
 
+class QubitPostSelection(BaseModel):
+    """Post-selection settings for a qubit."""
+    wireIndex: int
+    outcome: int  # 0 or 1
+
+
 class SimulationRequest(BaseModel):
     wires: list[Wire]
     elements: list[CircuitElement]
     fockTruncation: int = 10
+    postSelections: Optional[list[QubitPostSelection]] = None  # Qubit post-selections
 
 
 class ComplexNumber(BaseModel):

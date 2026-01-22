@@ -3,7 +3,7 @@ import GatePalette from './components/GatePalette';
 import CircuitCanvas from './components/CircuitCanvas';
 import DisplayPanel from './components/DisplayPanel';
 import GateParameterEditor from './components/GateParameterEditor';
-import type { Gate, Wire, CircuitElement, SimulationResult } from './types/circuit';
+import type { Gate, Wire, CircuitElement, SimulationResult, QubitPostSelection } from './types/circuit';
 import { ALL_GATES, getDefaultParameters } from './types/circuit';
 import { runSimulation } from './simulation/simulator';
 import { checkBackendHealth, runBackendSimulation } from './api/backend';
@@ -24,6 +24,9 @@ function App() {
 
   // For gate parameter editing
   const [selectedElement, setSelectedElement] = useState<CircuitElement | null>(null);
+
+  // Post-selection for qubits (for cat state visualization)
+  const [postSelections, setPostSelections] = useState<QubitPostSelection[]>([]);
 
   // Check backend health on mount
   useEffect(() => {
@@ -121,7 +124,7 @@ function App() {
     try {
       if (backend === 'python' && backendAvailable) {
         // Use Python backend
-        const result = await runBackendSimulation(wires, elements, fockTruncation);
+        const result = await runBackendSimulation(wires, elements, fockTruncation, postSelections);
         setSimulationResult(result);
       } else {
         // Use browser-based simulation
@@ -129,7 +132,7 @@ function App() {
         await new Promise<void>((resolve) => {
           setTimeout(() => {
             try {
-              const result = runSimulation(wires, elements, gatesMap, fockTruncation);
+              const result = runSimulation(wires, elements, gatesMap, fockTruncation, postSelections);
               setSimulationResult(result);
             } catch (error) {
               console.error('Simulation error:', error);
@@ -145,7 +148,7 @@ function App() {
     } finally {
       setIsSimulating(false);
     }
-  }, [wires, elements, gatesMap, fockTruncation, backend, backendAvailable]);
+  }, [wires, elements, gatesMap, fockTruncation, backend, backendAvailable, postSelections]);
 
   return (
     <div className="min-h-screen bg-slate-900 text-white">
@@ -248,6 +251,8 @@ function App() {
             onRunSimulation={handleRunSimulation}
             isSimulating={isSimulating}
             backend={backend}
+            postSelections={postSelections}
+            onPostSelectionsChange={setPostSelections}
           />
         </aside>
       </div>

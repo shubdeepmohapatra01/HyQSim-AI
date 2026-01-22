@@ -1,4 +1,4 @@
-import type { Wire, SimulationResult } from '../types/circuit';
+import type { Wire, SimulationResult, QubitPostSelection } from '../types/circuit';
 import QubitDisplay from './QubitDisplay';
 import QumodeDisplay from './QumodeDisplay';
 
@@ -12,6 +12,8 @@ interface DisplayPanelProps {
   onRunSimulation: () => void;
   isSimulating: boolean;
   backend: SimulationBackend;
+  postSelections: QubitPostSelection[];
+  onPostSelectionsChange: (selections: QubitPostSelection[]) => void;
 }
 
 export default function DisplayPanel({
@@ -22,6 +24,8 @@ export default function DisplayPanel({
   onRunSimulation,
   isSimulating,
   backend,
+  postSelections,
+  onPostSelectionsChange,
 }: DisplayPanelProps) {
   const qubits = wires
     .map((w, idx) => ({ wire: w, wireIndex: idx }))
@@ -29,6 +33,28 @@ export default function DisplayPanel({
   const qumodes = wires
     .map((w, idx) => ({ wire: w, wireIndex: idx }))
     .filter(({ wire }) => wire.type === 'qumode');
+
+  // Helper to get post-selection for a qubit wire
+  const getPostSelection = (wireIndex: number): 0 | 1 | 'none' => {
+    const ps = postSelections.find(p => p.wireIndex === wireIndex);
+    return ps ? ps.outcome : 'none';
+  };
+
+  // Helper to set post-selection for a qubit wire
+  const setPostSelection = (wireIndex: number, value: 0 | 1 | 'none') => {
+    if (value === 'none') {
+      onPostSelectionsChange(postSelections.filter(p => p.wireIndex !== wireIndex));
+    } else {
+      const existing = postSelections.find(p => p.wireIndex === wireIndex);
+      if (existing) {
+        onPostSelectionsChange(
+          postSelections.map(p => p.wireIndex === wireIndex ? { ...p, outcome: value } : p)
+        );
+      } else {
+        onPostSelectionsChange([...postSelections, { wireIndex, outcome: value }]);
+      }
+    }
+  };
 
   return (
     <div className="bg-slate-800 p-4 rounded-xl h-full overflow-y-auto">
@@ -72,6 +98,57 @@ export default function DisplayPanel({
           Higher values = more precision, slower simulation
         </p>
       </div>
+
+      {/* Post-selection controls (only show if there are qubits) */}
+      {qubits.length > 0 && (
+        <div className="mb-4 p-3 bg-slate-700 rounded-lg">
+          <label className="block text-sm text-slate-300 mb-2">
+            Qubit Post-Selection
+          </label>
+          <p className="text-[10px] text-slate-500 mb-2">
+            Project onto measurement outcome for pure states
+          </p>
+          <div className="space-y-2">
+            {qubits.map(({ wire, wireIndex }) => (
+              <div key={wire.id} className="flex items-center gap-2">
+                <span className="text-xs text-blue-400 w-12">q{wire.index}:</span>
+                <div className="flex bg-slate-600 rounded p-0.5">
+                  <button
+                    onClick={() => setPostSelection(wireIndex, 'none')}
+                    className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
+                      getPostSelection(wireIndex) === 'none'
+                        ? 'bg-slate-500 text-white'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Mixed
+                  </button>
+                  <button
+                    onClick={() => setPostSelection(wireIndex, 0)}
+                    className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
+                      getPostSelection(wireIndex) === 0
+                        ? 'bg-blue-600 text-white'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    |0⟩
+                  </button>
+                  <button
+                    onClick={() => setPostSelection(wireIndex, 1)}
+                    className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
+                      getPostSelection(wireIndex) === 1
+                        ? 'bg-purple-600 text-white'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    |1⟩
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Simulate button */}
       <div className="mb-4">

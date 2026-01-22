@@ -62,6 +62,9 @@ export interface QumodeState {
   fockProbabilities: number[];
   // Mean photon number
   meanPhotonNumber: number;
+  // Pre-computed Wigner function (from Python backend)
+  wignerData?: number[][];
+  wignerRange?: number;
 }
 
 export interface SimulationResult {
@@ -69,6 +72,11 @@ export interface SimulationResult {
   qumodeStates: Map<number, QumodeState>; // keyed by wire index
   backend: 'browser' | 'bosonic-qiskit';
   executionTime: number; // in milliseconds
+}
+
+export interface QubitPostSelection {
+  wireIndex: number;
+  outcome: 0 | 1;
 }
 
 // Predefined gates with parameters

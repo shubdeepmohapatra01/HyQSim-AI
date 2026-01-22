@@ -1,6 +1,6 @@
 // Main quantum circuit simulator
 
-import type { Wire, CircuitElement, Gate, SimulationResult, QubitState, QumodeState } from '../types/circuit';
+import type { Wire, CircuitElement, Gate, SimulationResult, QubitState, QumodeState, QubitPostSelection } from '../types/circuit';
 import { getDefaultParameters } from '../types/circuit';
 import type { StateVector, Complex } from './complex';
 import { complex, mul, add, scale, abs2, normalize, tensorProduct, matVecMul } from './complex';
@@ -41,7 +41,8 @@ export function runSimulation(
   wires: Wire[],
   elements: CircuitElement[],
   gates: Map<string, Gate>,
-  fockDim: number
+  fockDim: number,
+  postSelections: QubitPostSelection[] = []
 ): SimulationResult {
   const startTime = performance.now();
 
@@ -123,13 +124,17 @@ export function runSimulation(
         const qubitState = state.qubitStates.get(qubitWireIndex);
         const qumodeState = state.qumodeStates.get(qumodeWireIndex);
 
+        // Check if this qubit has post-selection
+        const qubitPostSelection = postSelections.find(ps => ps.wireIndex === qubitWireIndex);
+
         if (qubitState && qumodeState) {
           const [newQubitState, newQumodeState] = applyHybridGate(
             qubitState,
             qumodeState,
             gate.id,
             params,
-            fockDim
+            fockDim,
+            qubitPostSelection?.outcome
           );
           state.qubitStates.set(qubitWireIndex, newQubitState);
           state.qumodeStates.set(qumodeWireIndex, newQumodeState);
@@ -231,7 +236,8 @@ function applyHybridGate(
   qumodeState: StateVector,
   gateId: string,
   params: Record<string, number>,
-  fockDim: number
+  fockDim: number,
+  postSelection?: 0 | 1
 ): [StateVector, StateVector] {
   switch (gateId) {
     case 'cdisp': {
@@ -244,26 +250,35 @@ function applyHybridGate(
       const DminusAlpha = displacementMatrix(minusAlpha, fockDim);
 
       // Apply conditioned on qubit state
-      // |ψ⟩ = α|0⟩|φ₀⟩ + β|1⟩|φ₁⟩
-      // After CD: α|0⟩D(α)|φ₀⟩ + β|1⟩D(-α)|φ₁⟩
+      const displaced0 = matVecMul(Dalpha, qumodeState);  // |α⟩ when qubit is |0⟩
+      const displaced1 = matVecMul(DminusAlpha, qumodeState);  // |-α⟩ when qubit is |1⟩
 
-      // For separable input, output may be entangled
-      // Simplified: apply average displacement weighted by qubit amplitudes
-      const p0 = abs2(qubitState[0]);
-      const p1 = abs2(qubitState[1]);
-
-      // Apply D(α) with probability p0, D(-α) with probability p1
-      // This is an approximation; full simulation would need tensor product space
-      const displaced0 = matVecMul(Dalpha, qumodeState);
-      const displaced1 = matVecMul(DminusAlpha, qumodeState);
-
-      // Weighted combination (approximation for visualization)
+      // With post-selection, we can compute the exact post-selected state
+      // For H → CD → H circuit with post-selection:
+      //   Post-select |0⟩: even cat = |α⟩ + |-α⟩
+      //   Post-select |1⟩: odd cat = |α⟩ - |-α⟩
       const newQumodeState: StateVector = [];
-      for (let n = 0; n < fockDim; n++) {
-        newQumodeState.push(add(
-          scale(displaced0[n], Math.sqrt(p0)),
-          scale(displaced1[n], Math.sqrt(p1))
-        ));
+
+      if (postSelection === 0) {
+        // Even cat: |α⟩ + |-α⟩ (positive interference)
+        for (let n = 0; n < fockDim; n++) {
+          newQumodeState.push(add(displaced0[n], displaced1[n]));
+        }
+      } else if (postSelection === 1) {
+        // Odd cat: |α⟩ - |-α⟩ (negative interference)
+        for (let n = 0; n < fockDim; n++) {
+          newQumodeState.push(add(displaced0[n], scale(displaced1[n], -1)));
+        }
+      } else {
+        // No post-selection: weighted combination (approximation)
+        const p0 = abs2(qubitState[0]);
+        const p1 = abs2(qubitState[1]);
+        for (let n = 0; n < fockDim; n++) {
+          newQumodeState.push(add(
+            scale(displaced0[n], Math.sqrt(p0)),
+            scale(displaced1[n], Math.sqrt(p1))
+          ));
+        }
       }
 
       return [qubitState, normalize(newQumodeState)];
