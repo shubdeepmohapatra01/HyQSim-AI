@@ -120,7 +120,51 @@ The app uses Tailwind CSS. Modify colors in:
 
 ## Quick Start
 
-### Browser-Only Mode (No Backend)
+### Prerequisites
+
+- Node.js 18+
+- Python 3.10+
+- git
+
+### Installation
+
+Clone the repository and run the installation script:
+
+```bash
+git clone <repository-url>
+cd HyQSim
+./install.sh
+```
+
+This will:
+- Install frontend dependencies (npm packages)
+- Create a Python virtual environment
+- Install backend dependencies
+- Clone and install bosonic-qiskit
+
+### Running HyQSim
+
+Start both frontend and backend:
+
+```bash
+./run.sh start
+```
+
+Then open http://localhost:5173 in your browser.
+
+### Run Commands
+
+| Command | Description |
+|---------|-------------|
+| `./run.sh start` | Start both frontend and backend |
+| `./run.sh stop` | Stop both servers |
+| `./run.sh frontend` | Start frontend only (browser simulation) |
+| `./run.sh backend` | Start backend only |
+| `./run.sh status` | Check if servers are running |
+
+### Browser-Only Mode
+
+If you only want to use the browser-based simulator (no Python backend):
 
 ```bash
 cd frontend
@@ -128,11 +172,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 - the simulator will run entirely in your browser.
-
-### With Python Backend
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for full setup instructions.
+The simulator will run entirely in your browser with JavaScript. Some features like accurate bosonic-qiskit simulation won't be available.
 
 ## Tech Stack
 

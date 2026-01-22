@@ -2,13 +2,28 @@
 
 This guide will help you set up HyQSim locally for development with full Python backend support.
 
-## Prerequisites
+## Quick Setup
+
+The fastest way to get started:
+
+```bash
+git clone https://github.com/shubdeepmohapatra01/HyQSim.git
+cd HyQSim
+./install.sh     # Install all dependencies
+./run.sh start   # Start both servers
+```
+
+Then open http://localhost:5173
+
+## Manual Setup (Alternative)
+
+If you prefer manual setup or the install script doesn't work for your environment:
+
+### Prerequisites
 
 - **Node.js** 18+ and npm
 - **Python** 3.12 (recommended) or 3.10+
 - **Git**
-
-## Local Development Setup
 
 ### 1. Clone the Repository
 
@@ -64,7 +79,19 @@ python -c "from bosonic_qiskit import CVCircuit; print('bosonic-qiskit OK')"
 
 ## Running the Application
 
-### Start the Backend Server
+### Using run.sh (Recommended)
+
+```bash
+./run.sh start    # Start both frontend and backend
+./run.sh stop     # Stop both servers
+./run.sh status   # Check server status
+./run.sh frontend # Start frontend only
+./run.sh backend  # Start backend only
+```
+
+### Manual Start
+
+#### Start the Backend Server
 
 ```bash
 cd backend
@@ -80,7 +107,7 @@ curl http://localhost:8000/
 # Should return: {"service":"HyQSim Backend","status":"running","backends":{"bosonic-qiskit":true}}
 ```
 
-### Start the Frontend Development Server
+#### Start the Frontend Development Server
 
 In a new terminal:
 
