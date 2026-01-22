@@ -126,6 +126,29 @@ The app uses Tailwind CSS. Modify colors in:
 - Python 3.10+
 - git
 
+#### macOS
+
+```bash
+# Install Homebrew if not installed
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install prerequisites
+brew install node python@3.12 git
+```
+
+#### Windows
+
+1. **Node.js**: Download and install from https://nodejs.org/ (LTS version)
+2. **Python**: Download and install from https://python.org/ (check "Add to PATH" during install)
+3. **git**: Download and install from https://git-scm.com/
+
+Or using [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/):
+```powershell
+winget install OpenJS.NodeJS.LTS
+winget install Python.Python.3.12
+winget install Git.Git
+```
+
 ### Installation
 
 Clone the repository and run the installation script:
