@@ -220,6 +220,43 @@ def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
         wire_to_qumode_idx = {wire_idx: i for i, wire_idx in enumerate(qumode_wire_indices)}
         wire_to_qubit_idx = {wire_idx: i for i, wire_idx in enumerate(qubit_wire_indices)}
 
+        # Initialize qubits with specified initial states
+        for wire in request.wires:
+            wire_idx = request.wires.index(wire)
+            initial_state = wire.initialState
+
+            if wire.type.value == "qubit" and qbr is not None and wire_idx in wire_to_qubit_idx:
+                qubit_idx = wire_to_qubit_idx[wire_idx]
+                qubit = qbr[qubit_idx]
+
+                # Apply gates to prepare initial state
+                # |0⟩ is default, no gate needed
+                if initial_state == '1':
+                    circuit.x(qubit)
+                elif initial_state == '+':
+                    circuit.h(qubit)
+                elif initial_state == '-':
+                    circuit.x(qubit)
+                    circuit.h(qubit)
+                elif initial_state == 'i':
+                    circuit.h(qubit)
+                    circuit.s(qubit)
+                elif initial_state == '-i':
+                    circuit.h(qubit)
+                    circuit.sdg(qubit)
+
+            elif wire.type.value == "qumode" and wire_idx in wire_to_qumode_idx:
+                qumode_idx = wire_to_qumode_idx[wire_idx]
+                qumode = qmr[qumode_idx]
+
+                # Initialize qumode to Fock state |n⟩
+                # Default is vacuum |0⟩, no initialization needed
+                if initial_state is not None and initial_state != 0:
+                    n = int(initial_state)
+                    if 0 < n < request.fockTruncation:
+                        # Use cv_initialize to set Fock state |n⟩
+                        circuit.cv_initialize(n, qumode)
+
         # Sort elements by x position (execution order)
         sorted_elements = sorted(request.elements, key=lambda e: e.position.x)
 

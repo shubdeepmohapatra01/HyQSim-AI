@@ -67,6 +67,7 @@ export async function runBackendSimulation(
         id: w.id,
         type: w.type,
         index: i,
+        initialState: w.initialState,
       })),
       elements: elements.map((e) => ({
         id: e.id,
@@ -124,6 +125,7 @@ export async function runPreviewSimulation(
         id: w.id,
         type: w.type,
         index: i,
+        initialState: w.initialState,
       })),
       elements,
       fockTruncation,

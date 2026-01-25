@@ -14,6 +14,8 @@ class Wire(BaseModel):
     id: str
     type: WireType
     index: int
+    # Initial state: for qubits '0', '1', '+', '-', 'i', '-i'; for qumodes 0-5 (Fock state)
+    initialState: Optional[str | int] = None
 
 
 class Position(BaseModel):
