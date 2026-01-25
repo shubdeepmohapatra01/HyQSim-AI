@@ -102,7 +102,7 @@ HyQSim/
    - For qumode gates: `qumode.ts` → `applyQumodeGate()`
    - For hybrid gates: `simulator.ts` → `applyHybridGate()`
 
-3. **Add Python backend support** (optional) in `backend/simulation/bosonic.py`:
+3. **Add Python backend support** (if the python backend is to be used) in `backend/simulation/bosonic.py`:
    - Add gate ID to appropriate set (`SUPPORTED_QUMODE_GATES`, etc.)
    - Implement gate application in `run_bosonic_simulation()`
 
