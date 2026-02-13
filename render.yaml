@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: hyqsim-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: |
+      pip install -r requirements.txt
+      pip install git+https://github.com/C2QA/bosonic-qiskit.git
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
