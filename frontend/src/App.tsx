@@ -3,6 +3,9 @@ import GatePalette from './components/GatePalette';
 import CircuitCanvas from './components/CircuitCanvas';
 import DisplayPanel from './components/DisplayPanel';
 import GateParameterEditor from './components/GateParameterEditor';
+import QiskitIOModal from './components/QiskitIOModal';
+import BenchmarkMenu from './components/BenchmarkMenu';
+import { BENCHMARKS, recomputeCatCDParams } from './benchmarks/circuits';
 import type { Gate, Wire, CircuitElement, SimulationResult, QubitPostSelection, QubitInitialState, QumodeInitialState } from './types/circuit';
 import { ALL_GATES, getDefaultParameters } from './types/circuit';
 import { runSimulation } from './simulation/simulator';
@@ -25,8 +28,23 @@ function App() {
   // For gate parameter editing
   const [selectedElement, setSelectedElement] = useState<CircuitElement | null>(null);
 
+  // Saved custom gates (user-defined generators)
+  const [savedCustomGates, setSavedCustomGates] = useState<Array<{ name: string; expression: string }>>(
+    () => {
+      // Load from localStorage if available
+      const saved = localStorage.getItem('hyqsim-custom-gates');
+      return saved ? JSON.parse(saved) : [];
+    }
+  );
+
   // Post-selection for qubits (for cat state visualization)
   const [postSelections, setPostSelections] = useState<QubitPostSelection[]>([]);
+
+  // Number of measurement shots for bitstring histogram
+  const [shots, setShots] = useState(1024);
+
+  // Import/Export modal
+  const [qiskitIOMode, setQiskitIOMode] = useState<'import' | 'export' | null>(null);
 
   // Check backend health on mount
   useEffect(() => {
@@ -69,10 +87,22 @@ function App() {
   const handleRemoveWire = useCallback((wireId: string) => {
     const wireIndex = wires.findIndex((w) => w.id === wireId);
     setWires((prev) => prev.filter((w) => w.id !== wireId));
-    setElements((prev) => prev.filter((e) =>
-      e.wireIndex !== wireIndex &&
-      !(e.targetWireIndices?.includes(wireIndex))
-    ));
+    setElements((prev) =>
+      prev
+        // Remove elements on the deleted wire or targeting it
+        .filter((e) =>
+          e.wireIndex !== wireIndex &&
+          !(e.targetWireIndices?.includes(wireIndex))
+        )
+        // Shift down indices above the removed wire
+        .map((e) => ({
+          ...e,
+          wireIndex: e.wireIndex > wireIndex ? e.wireIndex - 1 : e.wireIndex,
+          targetWireIndices: e.targetWireIndices?.map(t =>
+            t > wireIndex ? t - 1 : t
+          ),
+        }))
+    );
     setSimulationResult(null);
   }, [wires]);
 
@@ -91,14 +121,16 @@ function App() {
   }, []);
 
   const handleDropGate = useCallback(
-    (gate: Gate, wireIndex: number, position: { x: number; y: number }, targetWireIndices?: number[]) => {
+    (gate: Gate & { generatorExpression?: string }, wireIndex: number, position: { x: number; y: number }, targetWireIndices?: number[]) => {
       const newElement: CircuitElement = {
         id: `element-${Date.now()}`,
-        gateId: gate.id,
+        gateId: gate.category === 'custom' ? 'custom' : gate.id, // Use base 'custom' id for all custom gates
         position,
         wireIndex,
         targetWireIndices,
         parameterValues: getDefaultParameters(gate),
+        // Preserve generator expression from saved custom gates
+        generatorExpression: gate.generatorExpression,
       };
 
       setElements((prev) => [...prev, newElement]);
@@ -113,18 +145,76 @@ function App() {
 
   const handleElementClick = useCallback((element: CircuitElement) => {
     const gate = gatesMap.get(element.gateId);
-    if (gate?.parameters && gate.parameters.length > 0) {
+    // Open editor for gates with parameters OR custom gates (which need expression input)
+    if ((gate?.parameters && gate.parameters.length > 0) || gate?.category === 'custom') {
       setSelectedElement(element);
     }
   }, [gatesMap]);
 
   const handleUpdateParameters = useCallback((elementId: string, params: Record<string, number>) => {
+    setElements((prev) => {
+      const updated = prev.map((e) =>
+        e.id === elementId ? { ...e, parameterValues: params } : e
+      );
+      // Propagate linked cat state CD parameters
+      const changedEl = updated.find((e) => e.id === elementId);
+      if (changedEl?.benchmarkGroup === 'cat-cd1' || changedEl?.benchmarkGroup === 'cat-cd2') {
+        const { partnerGroup, partnerParams } = recomputeCatCDParams(
+          changedEl.benchmarkGroup as 'cat-cd1' | 'cat-cd2',
+          params,
+        );
+        return updated.map((e) =>
+          e.benchmarkGroup === partnerGroup ? { ...e, parameterValues: partnerParams } : e
+        );
+      }
+      return updated;
+    });
+    setSimulationResult(null);
+  }, []);
+
+  const handleUpdateGeneratorExpression = useCallback((elementId: string, expression: string) => {
     setElements((prev) =>
       prev.map((e) =>
-        e.id === elementId ? { ...e, parameterValues: params } : e
+        e.id === elementId ? { ...e, generatorExpression: expression } : e
       )
     );
     setSimulationResult(null);
+  }, []);
+
+  const handleUpdateTargetWire = useCallback((elementId: string, targetWireIndex: number) => {
+    setElements((prev) =>
+      prev.map((e) =>
+        e.id === elementId ? { ...e, targetWireIndices: [targetWireIndex] } : e
+      )
+    );
+    setSimulationResult(null);
+  }, []);
+
+  const handleSaveCustomGate = useCallback((name: string, expression: string) => {
+    setSavedCustomGates((prev) => {
+      // Check if name already exists
+      const existing = prev.findIndex((g) => g.name === name);
+      let updated;
+      if (existing >= 0) {
+        // Update existing
+        updated = [...prev];
+        updated[existing] = { name, expression };
+      } else {
+        // Add new
+        updated = [...prev, { name, expression }];
+      }
+      // Persist to localStorage
+      localStorage.setItem('hyqsim-custom-gates', JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
+
+  const handleRemoveCustomGate = useCallback((name: string) => {
+    setSavedCustomGates((prev) => {
+      const updated = prev.filter((g) => g.name !== name);
+      localStorage.setItem('hyqsim-custom-gates', JSON.stringify(updated));
+      return updated;
+    });
   }, []);
 
   const handleRunSimulation = useCallback(async () => {
@@ -133,7 +223,7 @@ function App() {
     try {
       if (backend === 'python' && backendAvailable) {
         // Use Python backend
-        const result = await runBackendSimulation(wires, elements, fockTruncation, postSelections);
+        const result = await runBackendSimulation(wires, elements, fockTruncation, postSelections, shots);
         setSimulationResult(result);
       } else {
         // Use browser-based simulation
@@ -158,6 +248,79 @@ function App() {
       setIsSimulating(false);
     }
   }, [wires, elements, gatesMap, fockTruncation, backend, backendAvailable, postSelections]);
+
+  const handleImportCircuit = useCallback((newWires: Wire[], newElements: CircuitElement[]) => {
+    setWires(newWires);
+    setElements(newElements);
+    setQubitCount(newWires.filter(w => w.type === 'qubit').length);
+    setQumodeCount(newWires.filter(w => w.type === 'qumode').length);
+    setSimulationResult(null);
+    setPostSelections([]);
+  }, []);
+
+  const handleLoadBenchmark = useCallback((benchmarkId: string, mode: 'new' | 'append', params?: Record<string, number>) => {
+    const benchmark = BENCHMARKS.find(b => b.id === benchmarkId);
+    if (!benchmark) return;
+    const { wires: bmWires, elements: bmElements, fockTruncation: newFock } = benchmark.build(params);
+
+    if (mode === 'new' || wires.length === 0) {
+      setWires(bmWires);
+      setElements(bmElements);
+      setFockTruncation(newFock);
+      setQubitCount(bmWires.filter(w => w.type === 'qubit').length);
+      setQumodeCount(bmWires.filter(w => w.type === 'qumode').length);
+      setSimulationResult(null);
+      setPostSelections([]);
+      return;
+    }
+
+    // Append mode: reuse existing qumode, add new qubits, remap and append elements
+    const existingQumodeIdx = wires.findIndex(w => w.type === 'qumode');
+    const bmQumodeIdx = bmWires.findIndex(w => w.type === 'qumode');
+    const bmQubits = bmWires.filter(w => w.type === 'qubit');
+
+    // Build wire index mapping: benchmark wire index → new wire index
+    const wireMap = new Map<number, number>();
+    if (bmQumodeIdx >= 0 && existingQumodeIdx >= 0) {
+      wireMap.set(bmQumodeIdx, existingQumodeIdx);
+    }
+
+    // Add new qubit wires
+    const newWires = [...wires];
+    let nextQubitCount = qubitCount;
+    for (const bmQubit of bmQubits) {
+      const bmIdx = bmWires.indexOf(bmQubit);
+      const newIdx = newWires.length;
+      wireMap.set(bmIdx, newIdx);
+      newWires.push({
+        id: `wire-qubit-${nextQubitCount}`,
+        type: 'qubit',
+        index: nextQubitCount,
+        initialState: bmQubit.initialState,
+      });
+      nextQubitCount++;
+    }
+
+    // Calculate x-offset: start after the last existing gate
+    const maxExistingX = elements.reduce((max, el) => Math.max(max, el.position.x), 0);
+    const xOffset = maxExistingX + 80;
+
+    // Remap benchmark elements
+    const remappedElements = bmElements.map((el) => ({
+      ...el,
+      id: `${el.id}-appended-${Date.now()}`,
+      wireIndex: wireMap.get(el.wireIndex) ?? el.wireIndex,
+      targetWireIndices: el.targetWireIndices?.map(t => wireMap.get(t) ?? t),
+      position: { x: el.position.x + xOffset, y: el.position.y },
+    }));
+
+    setWires(newWires);
+    setElements([...elements, ...remappedElements]);
+    setFockTruncation(Math.max(fockTruncation, newFock));
+    setQubitCount(nextQubitCount);
+    setQumodeCount(newWires.filter(w => w.type === 'qumode').length);
+    setSimulationResult(null);
+  }, [wires, elements, qubitCount, fockTruncation]);
 
   return (
     <div className="min-h-screen bg-slate-900 text-white">
@@ -217,6 +380,27 @@ function App() {
               </div>
             </div>
 
+            {/* Benchmarks + Import/Export */}
+            <div className="flex items-center gap-1">
+              <BenchmarkMenu onLoadBenchmark={handleLoadBenchmark} hasExistingCircuit={wires.length > 0} />
+              <button
+                onClick={() => setQiskitIOMode('import')}
+                disabled={!backendAvailable}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title={backendAvailable ? 'Import bosonic qiskit code' : 'Requires Python backend'}
+              >
+                Import
+              </button>
+              <button
+                onClick={() => setQiskitIOMode('export')}
+                disabled={!backendAvailable || elements.length === 0}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title={backendAvailable ? 'Export as bosonic qiskit code' : 'Requires Python backend'}
+              >
+                Export
+              </button>
+            </div>
+
             <div className="flex flex-col items-end gap-0.5">
               <span className="text-xs text-slate-500">
                 CV-DV Hybrid | Fock: {fockTruncation}
@@ -233,7 +417,11 @@ function App() {
       <div className="flex h-[calc(100vh-80px)]">
         {/* Left sidebar - Gate Palette */}
         <aside className="w-64 p-4 border-r border-slate-700 overflow-hidden">
-          <GatePalette onDragStart={handleDragStart} />
+          <GatePalette
+            onDragStart={handleDragStart}
+            savedCustomGates={savedCustomGates}
+            onRemoveCustomGate={handleRemoveCustomGate}
+          />
         </aside>
 
         {/* Center - Circuit Canvas */}
@@ -263,6 +451,8 @@ function App() {
             backend={backend}
             postSelections={postSelections}
             onPostSelectionsChange={setPostSelections}
+            shots={shots}
+            onShotsChange={setShots}
           />
         </aside>
       </div>
@@ -279,10 +469,27 @@ function App() {
             element={currentElement}
             gate={gate}
             onUpdateParameters={handleUpdateParameters}
+            onUpdateGeneratorExpression={handleUpdateGeneratorExpression}
+            onUpdateTargetWire={handleUpdateTargetWire}
+            onSaveCustomGate={handleSaveCustomGate}
+            wires={wires}
             onClose={() => setSelectedElement(null)}
           />
         );
       })()}
+
+      {/* Qiskit Import/Export Modal */}
+      {qiskitIOMode && (
+        <QiskitIOModal
+          mode={qiskitIOMode}
+          wires={wires}
+          elements={elements}
+          fockTruncation={fockTruncation}
+          onImport={handleImportCircuit}
+          onClose={() => setQiskitIOMode(null)}
+          backendAvailable={backendAvailable}
+        />
+      )}
     </div>
   );
 }
