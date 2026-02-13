@@ -32,7 +32,7 @@ from .models import (
 
 
 # Gates available in bosonic-qiskit
-SUPPORTED_QUMODE_GATES = {'displace', 'squeeze', 'rotate', 'bs', 'kerr'}
+SUPPORTED_QUMODE_GATES = {'displace', 'squeeze', 'rotate', 'bs', 'kerr', 'annihilate', 'create'}
 SUPPORTED_QUBIT_GATES = {'h', 'x', 'y', 'z', 's', 'sdg', 't', 'rx', 'ry', 'rz', 'cnot'}
 SUPPORTED_HYBRID_GATES = {'cdisp', 'cr', 'snap', 'ecd'}
 
@@ -296,6 +296,11 @@ def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
                         # bosonic-qiskit cv_bs takes complex theta
                         circuit.cv_bs(complex(theta), qumode, target_qumode)
 
+                elif gate_id in ("annihilate", "create"):
+                    # Non-unitary operators: not supported by bosonic-qiskit circuit model.
+                    # These are handled by the browser tensor simulation instead.
+                    pass
+
             # === QUBIT GATES ===
             elif wire_idx in wire_to_qubit_idx and qbr is not None:
                 qubit_idx = wire_to_qubit_idx[wire_idx]
@@ -360,8 +365,26 @@ def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
                         theta = params.get("theta", np.pi)
                         circuit.cv_snap(theta, n, qumode, qubit)
 
+        # Add qubit measurements for bitstring counts (reversed bit ordering)
+        if num_qubits > 0 and qbr is not None:
+            from qiskit import ClassicalRegister
+            cr = ClassicalRegister(num_qubits, name="cr")
+            circuit.add_register(cr)
+            for i in range(num_qubits):
+                circuit.measure(qbr[i], cr[-(i + 1)])
+
         # Simulate
-        statevector, result, fockcounts = simulate(circuit, shots=1024, add_save_statevector=True)
+        statevector, result, fockcounts = simulate(circuit, shots=request.shots, add_save_statevector=True)
+
+        # Extract bitstring measurement counts
+        bitstring_counts = None
+        if result is not None:
+            try:
+                counts = result.get_counts()
+                if counts:
+                    bitstring_counts = {k: int(v) for k, v in counts.items()}
+            except Exception:
+                pass
 
         # Extract states
         qubit_states = {}
@@ -391,7 +414,8 @@ def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
             qubitStates=qubit_states,
             qumodeStates=qumode_states,
             executionTime=time.time() - start_time,
-            backend="bosonic-qiskit"
+            backend="bosonic-qiskit",
+            bitstringCounts=bitstring_counts
         )
 
     except Exception as e:

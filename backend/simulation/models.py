@@ -43,6 +43,7 @@ class SimulationRequest(BaseModel):
     elements: list[CircuitElement]
     fockTruncation: int = 10
     postSelections: Optional[list[QubitPostSelection]] = None  # Qubit post-selections
+    shots: int = 1024
 
 
 class ComplexNumber(BaseModel):
@@ -71,4 +72,29 @@ class SimulationResponse(BaseModel):
     qumodeStates: dict[int, QumodeState]  # keyed by wire index
     executionTime: float  # in seconds
     backend: str  # "bosonic-qiskit" or "qutip"
+    error: Optional[str] = None
+    bitstringCounts: Optional[dict[str, int]] = None
+
+
+class ImportRequest(BaseModel):
+    code: str
+
+
+class ImportResponse(BaseModel):
+    success: bool
+    wires: list[Wire] = []
+    elements: list[CircuitElement] = []
+    error: Optional[str] = None
+    warnings: list[str] = []
+
+
+class ExportRequest(BaseModel):
+    wires: list[Wire]
+    elements: list[CircuitElement]
+    fockTruncation: int = 10
+
+
+class ExportResponse(BaseModel):
+    success: bool
+    code: str = ""
     error: Optional[str] = None

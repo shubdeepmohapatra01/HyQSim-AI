@@ -4,12 +4,30 @@ HyQSim Backend - FastAPI server for quantum simulations.
 Run with: uvicorn main:app --reload --port 8000
 """
 
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from simulation.models import SimulationRequest, SimulationResponse
+from simulation.models import (
+    SimulationRequest, SimulationResponse,
+    ImportRequest, ImportResponse,
+    ExportRequest, ExportResponse,
+)
 from simulation.bosonic import run_bosonic_simulation, HAS_BOSONIC
+from simulation.qiskit_io import parse_bosonic_qiskit, generate_bosonic_qiskit
+
+# Get allowed origins from environment variable or use defaults
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "").split(",") if os.environ.get("ALLOWED_ORIGINS") else []
+ALLOWED_ORIGINS.extend([
+    "http://localhost:5173",  # Vite dev server
+    "http://localhost:3000",  # Alternative frontend port
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+    "https://webpublishing.oit.ncsu.edu",  # NC State web publishing
+])
+# Filter out empty strings
+ALLOWED_ORIGINS = [origin for origin in ALLOWED_ORIGINS if origin]
 
 
 @asynccontextmanager
@@ -35,12 +53,7 @@ app = FastAPI(
 # CORS middleware to allow frontend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vite dev server
-        "http://localhost:3000",  # Alternative frontend port
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -110,6 +123,24 @@ async def simulate_preview(request: SimulationRequest):
     )
 
     return await simulate(preview_request)
+
+
+@app.post("/import", response_model=ImportResponse)
+async def import_circuit(request: ImportRequest):
+    """Parse bosonic qiskit code and return HyQSim circuit data."""
+    try:
+        return parse_bosonic_qiskit(request.code)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/export", response_model=ExportResponse)
+async def export_circuit(request: ExportRequest):
+    """Generate bosonic qiskit code from HyQSim circuit data."""
+    try:
+        return generate_bosonic_qiskit(request.wires, request.elements, request.fockTruncation)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 if __name__ == "__main__":
