@@ -9,6 +9,7 @@ import {
   applyQumodeGate as applyTensorQumodeGate,
   applyHybridGate as applyTensorHybridGate,
   applyCNOTGate,
+  applyCustomGate,
   applyPostSelection,
   partialTraceToSubsystem,
   densityMatrixToQubitState,
@@ -91,6 +92,19 @@ export function runSimulation(
           fockDim
         );
       }
+    } else if (gate.category === 'custom' && element.generatorExpression) {
+      // Custom generator gate
+      const theta = params.theta ?? Math.PI / 4;
+      const targetWireIndex = element.targetWireIndices?.[0];
+
+      state = applyCustomGate(
+        state,
+        wireIndex,
+        targetWireIndex,
+        element.generatorExpression,
+        theta,
+        fockDim
+      );
     }
   }
 

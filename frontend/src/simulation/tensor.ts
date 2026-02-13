@@ -8,7 +8,8 @@ import {
   normalize, identity,
 } from './complex';
 import { GATES, Rx, Ry, Rz, CNOT } from './qubit';
-import { displacementMatrix, squeezingMatrix, rotationMatrix } from './qumode';
+import { displacementMatrix, squeezingMatrix, rotationMatrix, annihilationMatrix, creationMatrix } from './qumode';
+import { buildCustomUnitary } from './customGenerator';
 import type { Wire, QubitInitialState, QumodeInitialState } from '../types/circuit';
 
 // Get initial state vector for a qubit
@@ -492,6 +493,14 @@ export function applyQumodeGate(
       gate = rotationMatrix(params.theta ?? 0, fockDim);
       break;
     }
+    case 'annihilate': {
+      gate = annihilationMatrix(fockDim);
+      break;
+    }
+    case 'create': {
+      gate = creationMatrix(fockDim);
+      break;
+    }
     default:
       return state;
   }
@@ -534,6 +543,36 @@ export function applyCNOTGate(
   targetWireIndex: number
 ): TensorState {
   return applyTwoSubsystemGate(state, controlWireIndex, targetWireIndex, CNOT);
+}
+
+// Apply custom generator gate
+export function applyCustomGate(
+  state: TensorState,
+  wireIndex: number,
+  targetWireIndex: number | undefined,
+  expression: string,
+  theta: number,
+  fockDim: number
+): TensorState {
+  try {
+    const { unitary, type } = buildCustomUnitary(expression, theta, fockDim);
+
+    if (type === 'cv') {
+      // CV-only gate: apply to qumode
+      return applySingleGate(state, wireIndex, unitary);
+    } else if (type === 'dv') {
+      // DV-only gate: apply to qubit
+      return applySingleGate(state, wireIndex, unitary);
+    } else if (type === 'hybrid' && targetWireIndex !== undefined) {
+      // Hybrid gate: apply to qubit-qumode pair
+      return applyTwoSubsystemGate(state, wireIndex, targetWireIndex, unitary);
+    }
+
+    return state;
+  } catch (error) {
+    console.error('Custom gate error:', error);
+    return state;
+  }
 }
 
 // Apply post-selection on a qubit
