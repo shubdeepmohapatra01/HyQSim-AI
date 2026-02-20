@@ -385,17 +385,16 @@ function App() {
               <BenchmarkMenu onLoadBenchmark={handleLoadBenchmark} hasExistingCircuit={wires.length > 0} />
               <button
                 onClick={() => setQiskitIOMode('import')}
-                disabled={!backendAvailable}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title={backendAvailable ? 'Import bosonic qiskit code' : 'Requires Python backend'}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors"
+                title="Import bosonic qiskit code"
               >
                 Import
               </button>
               <button
                 onClick={() => setQiskitIOMode('export')}
-                disabled={!backendAvailable || elements.length === 0}
+                disabled={elements.length === 0}
                 className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title={backendAvailable ? 'Export as bosonic qiskit code' : 'Requires Python backend'}
+                title="Export as bosonic qiskit code"
               >
                 Export
               </button>
@@ -487,7 +486,6 @@ function App() {
           fockTruncation={fockTruncation}
           onImport={handleImportCircuit}
           onClose={() => setQiskitIOMode(null)}
-          backendAvailable={backendAvailable}
         />
       )}
     </div>

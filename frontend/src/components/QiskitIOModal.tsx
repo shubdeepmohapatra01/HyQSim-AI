@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { Wire, CircuitElement } from '../types/circuit';
-import { importBosonicQiskit, exportBosonicQiskit } from '../api/backend';
+import { parseBosonicQiskit, generateBosonicQiskit } from '../simulation/qiskitIO';
 
 interface QiskitIOModalProps {
   mode: 'import' | 'export';
@@ -9,7 +9,6 @@ interface QiskitIOModalProps {
   fockTruncation: number;
   onImport: (wires: Wire[], elements: CircuitElement[]) => void;
   onClose: () => void;
-  backendAvailable: boolean;
 }
 
 export default function QiskitIOModal({
@@ -19,23 +18,19 @@ export default function QiskitIOModal({
   fockTruncation,
   onImport,
   onClose,
-  backendAvailable,
 }: QiskitIOModalProps) {
   const [activeTab, setActiveTab] = useState<'import' | 'export'>(initialMode);
   const [code, setCode] = useState('');
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [exportedCode, setExportedCode] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<{ wires: Wire[]; elements: CircuitElement[] } | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const handleExport = useCallback(async () => {
-    if (!backendAvailable) return;
-    setLoading(true);
+  const handleExport = useCallback(() => {
     setError(null);
     try {
-      const result = await exportBosonicQiskit(wires, elements, fockTruncation);
+      const result = generateBosonicQiskit(wires, elements, fockTruncation);
       if (result.success) {
         setExportedCode(result.code);
       } else {
@@ -43,29 +38,26 @@ export default function QiskitIOModal({
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed');
-    } finally {
-      setLoading(false);
     }
-  }, [wires, elements, fockTruncation, backendAvailable]);
+  }, [wires, elements, fockTruncation]);
 
   // Auto-export when switching to export tab
   useEffect(() => {
-    if (activeTab === 'export' && !exportedCode && !loading) {
+    if (activeTab === 'export' && !exportedCode) {
       handleExport();
     }
-  }, [activeTab, exportedCode, loading, handleExport]);
+  }, [activeTab, exportedCode, handleExport]);
 
-  const handleImport = async () => {
+  const handleImport = () => {
     if (!code.trim()) {
       setError('Please paste some bosonic qiskit code.');
       return;
     }
-    setLoading(true);
     setError(null);
     setWarnings([]);
     setImportResult(null);
     try {
-      const result = await importBosonicQiskit(code);
+      const result = parseBosonicQiskit(code);
       if (result.success) {
         setImportResult({ wires: result.wires, elements: result.elements });
         setWarnings(result.warnings || []);
@@ -74,8 +66,6 @@ export default function QiskitIOModal({
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Import failed');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -109,24 +99,6 @@ export default function QiskitIOModal({
       setImportResult(null);
     }
   };
-
-  if (!backendAvailable) {
-    return (
-      <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
-        <div className="bg-slate-800 rounded-xl p-6 w-[500px] border border-slate-600" onClick={(e) => e.stopPropagation()}>
-          <p className="text-slate-300 text-center">
-            Python backend is required for import/export. Please start the backend server.
-          </p>
-          <button
-            onClick={onClose}
-            className="mt-4 w-full px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm transition-colors"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
@@ -222,10 +194,10 @@ export default function QiskitIOModal({
                 )}
                 <button
                   onClick={handleImport}
-                  disabled={loading || !code.trim()}
+                  disabled={!code.trim()}
                   className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors"
                 >
-                  {loading ? 'Parsing...' : 'Parse Code'}
+                  Parse Code
                 </button>
               </div>
             </div>
@@ -234,16 +206,6 @@ export default function QiskitIOModal({
               <p className="text-sm text-slate-400">
                 Generated bosonic qiskit (c2qa) Python code for your circuit.
               </p>
-
-              {loading && (
-                <div className="flex items-center justify-center py-12 text-slate-400">
-                  <svg className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  Generating code...
-                </div>
-              )}
 
               {error && (
                 <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300">
@@ -277,7 +239,7 @@ export default function QiskitIOModal({
                 </>
               )}
 
-              {!loading && !exportedCode && !error && (
+              {!exportedCode && !error && (
                 <p className="text-center text-slate-500 py-8">
                   No circuit to export. Add some gates first.
                 </p>
