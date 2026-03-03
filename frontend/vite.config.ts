@@ -9,4 +9,8 @@ export default defineConfig({
   // Use environment variable or default to '/'
   // For NC State: VITE_BASE_PATH=/cvdv-ncsu-edu/
   base: process.env.VITE_BASE_PATH || '/',
+  server: {
+    port: 5173,
+    strictPort: true, // Error instead of picking a different port
+  },
 })
