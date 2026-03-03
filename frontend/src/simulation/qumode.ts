@@ -257,6 +257,154 @@ export function stateVectorToQumodeState(state: StateVector): QumodeState {
   };
 }
 
+// Beam splitter unitary for two qumodes
+// U = exp(theta * (e^{i*phi} a†b - e^{-i*phi} ab†))
+// Returns a (fockDim²) × (fockDim²) matrix in the 2-mode Fock basis |m⟩_a ⊗ |n⟩_b
+// indexed as m * fockDim + n.
+// Exploits conservation of total photon number N = m + n:
+// decomposes into independent N-photon sectors and exponentiates each via scaling+squaring.
+export function beamSplitterMatrix(theta: number, phi: number, fockDim: number): Matrix {
+  const totalDim = fockDim * fockDim;
+  const result: Matrix = [];
+  for (let i = 0; i < totalDim; i++) {
+    result[i] = new Array(totalDim).fill(ZERO);
+  }
+
+  const cosP = Math.cos(phi);
+  const sinP = Math.sin(phi);
+
+  for (let N = 0; N <= 2 * (fockDim - 1); N++) {
+    const kMin = Math.max(0, N - (fockDim - 1));
+    const kMax = Math.min(N, fockDim - 1);
+    const sectorDim = kMax - kMin + 1;
+
+    // Trivial 1×1 sector: the state is already an eigenstate
+    if (sectorDim === 1) {
+      const fullIdx = kMin * fockDim + (N - kMin);
+      result[fullIdx][fullIdx] = ONE;
+      continue;
+    }
+
+    // Build anti-Hermitian generator G_N in the N-photon sector basis
+    // {|kMin, N-kMin⟩, |kMin+1, N-kMin-1⟩, ...}
+    // G|k, N-k⟩ = e^{i*phi}√((k+1)(N-k))|k+1,N-k-1⟩ - e^{-i*phi}√(k(N-k+1))|k-1,N-k+1⟩
+    const G: Complex[][] = [];
+    for (let s = 0; s < sectorDim; s++) {
+      G[s] = new Array(sectorDim).fill(ZERO);
+    }
+
+    for (let s = 0; s < sectorDim; s++) {
+      const k = kMin + s;
+      const nk = N - k;
+      // a†b: k → k+1 (raise mode a, lower mode b)
+      if (s + 1 < sectorDim && nk > 0) {
+        const c = Math.sqrt((k + 1) * nk);
+        G[s + 1][s] = { re: cosP * c, im: sinP * c }; // e^{i*phi} * c
+      }
+      // ab†: k → k-1 (lower mode a, raise mode b)
+      if (s - 1 >= 0 && k > 0) {
+        const c = Math.sqrt(k * (nk + 1));
+        G[s - 1][s] = { re: -cosP * c, im: sinP * c }; // -e^{-i*phi} * c
+      }
+    }
+
+    // thetaG = theta * G, then exp(thetaG) via scaling+squaring
+    const thetaG: Complex[][] = G.map(row => row.map(c => ({ re: c.re * theta, im: c.im * theta })));
+    const expG = bsMatExpScaleSquare(thetaG, sectorDim);
+
+    // Write sector result back into the full 2-mode matrix
+    for (let sRow = 0; sRow < sectorDim; sRow++) {
+      const kRow = kMin + sRow;
+      const fullRow = kRow * fockDim + (N - kRow);
+      for (let sCol = 0; sCol < sectorDim; sCol++) {
+        const kCol = kMin + sCol;
+        const fullCol = kCol * fockDim + (N - kCol);
+        result[fullRow][fullCol] = expG[sRow][sCol];
+      }
+    }
+  }
+
+  return result;
+}
+
+// --- Helpers for beamSplitterMatrix ---
+
+function bsMatMul(A: Complex[][], B: Complex[][], dim: number): Complex[][] {
+  const C: Complex[][] = [];
+  for (let i = 0; i < dim; i++) {
+    C[i] = new Array(dim).fill(ZERO);
+    for (let k = 0; k < dim; k++) {
+      if (A[i][k].re === 0 && A[i][k].im === 0) continue;
+      for (let j = 0; j < dim; j++) {
+        C[i][j] = {
+          re: C[i][j].re + A[i][k].re * B[k][j].re - A[i][k].im * B[k][j].im,
+          im: C[i][j].im + A[i][k].re * B[k][j].im + A[i][k].im * B[k][j].re,
+        };
+      }
+    }
+  }
+  return C;
+}
+
+function bsIdentity(dim: number): Complex[][] {
+  const I: Complex[][] = [];
+  for (let i = 0; i < dim; i++) {
+    I[i] = new Array(dim).fill(ZERO);
+    I[i][i] = ONE;
+  }
+  return I;
+}
+
+// Matrix exponential via scaling and squaring + Taylor series
+function bsMatExpScaleSquare(A: Complex[][], dim: number): Complex[][] {
+  // Estimate 1-norm (max column sum of absolute values)
+  let norm1 = 0;
+  for (let j = 0; j < dim; j++) {
+    let colSum = 0;
+    for (let i = 0; i < dim; i++) {
+      colSum += Math.sqrt(A[i][j].re * A[i][j].re + A[i][j].im * A[i][j].im);
+    }
+    norm1 = Math.max(norm1, colSum);
+  }
+
+  // Scale down: find m so that norm / 2^m < 0.5
+  let m = 0;
+  let scaledNorm = norm1;
+  while (scaledNorm > 0.5 && m < 24) {
+    scaledNorm /= 2;
+    m++;
+  }
+
+  const sf = Math.pow(2, m);
+  const scaledA: Complex[][] = A.map(row => row.map(c => ({ re: c.re / sf, im: c.im / sf })));
+
+  // Taylor series: exp(A) = I + A + A²/2! + ... (25 terms)
+  let result = bsIdentity(dim);
+  let power = bsIdentity(dim);
+
+  for (let k = 1; k <= 25; k++) {
+    const newPower = bsMatMul(power, scaledA, dim);
+    for (let i = 0; i < dim; i++) {
+      for (let j = 0; j < dim; j++) {
+        newPower[i][j] = { re: newPower[i][j].re / k, im: newPower[i][j].im / k };
+      }
+    }
+    power = newPower;
+    for (let i = 0; i < dim; i++) {
+      for (let j = 0; j < dim; j++) {
+        result[i][j] = { re: result[i][j].re + power[i][j].re, im: result[i][j].im + power[i][j].im };
+      }
+    }
+  }
+
+  // Square m times to recover exp(A) from exp(A/2^m)
+  for (let i = 0; i < m; i++) {
+    result = bsMatMul(result, result, dim);
+  }
+
+  return result;
+}
+
 // Helper functions
 function factorial(n: number): number {
   if (n <= 1) return 1;

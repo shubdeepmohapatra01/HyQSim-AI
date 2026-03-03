@@ -8,7 +8,7 @@ import {
   normalize, identity,
 } from './complex';
 import { GATES, Rx, Ry, Rz, CNOT } from './qubit';
-import { displacementMatrix, squeezingMatrix, rotationMatrix, annihilationMatrix, creationMatrix } from './qumode';
+import { displacementMatrix, squeezingMatrix, rotationMatrix, kerrMatrix, annihilationMatrix, creationMatrix, beamSplitterMatrix } from './qumode';
 import { buildCustomUnitary } from './customGenerator';
 import type { Wire, QubitInitialState, QumodeInitialState } from '../types/circuit';
 
@@ -254,6 +254,42 @@ export function controlledDisplacementMatrix(alpha: Complex, fockDim: number): M
   return result;
 }
 
+// Build Jaynes-Cummings coupling matrix
+// U = exp(-i*theta*(sigma_+ a + sigma_- a†))
+// Couples |g,n⟩ ↔ |e,n-1⟩ within each excitation subspace.
+// Basis: |qubit, fock⟩ = qubit*fockDim + fock  (qubit 0=ground, 1=excited)
+export function jaynesCouplingMatrix(theta: number, fockDim: number): Matrix {
+  const dim = 2 * fockDim;
+  const result: Matrix = [];
+  for (let i = 0; i < dim; i++) {
+    result[i] = new Array(dim).fill(ZERO);
+  }
+
+  // |g,0⟩ (index 0) is decoupled — no photon to exchange
+  result[0][0] = ONE;
+
+  // For n = 1..fockDim-1: invariant subspace {|g,n⟩, |e,n-1⟩}
+  // Generator restricted to subspace: G_n = sqrt(n) * sigma_x
+  // => U_n = [[cos(θ√n), -i·sin(θ√n)], [-i·sin(θ√n), cos(θ√n)]]
+  for (let n = 1; n < fockDim; n++) {
+    const gn  = n;              // index of |g,n⟩
+    const en1 = fockDim + n - 1; // index of |e,n-1⟩
+    const c = Math.cos(theta * Math.sqrt(n));
+    const s = Math.sin(theta * Math.sqrt(n));
+
+    result[gn][gn]   = { re: c, im: 0 };
+    result[en1][gn]  = { re: 0, im: -s };
+    result[gn][en1]  = { re: 0, im: -s };
+    result[en1][en1] = { re: c, im: 0 };
+  }
+
+  // |e,fockDim-1⟩ (index 2*fockDim-1): partner |g,fockDim⟩ is outside truncation
+  // Approximate as fixed (truncation artefact is negligible for fockDim >> mean photon number)
+  result[dim - 1][dim - 1] = ONE;
+
+  return result;
+}
+
 // Build controlled rotation gate matrix
 // |0⟩⟨0| ⊗ I + |1⟩⟨1| ⊗ R(θ)
 export function controlledRotationMatrix(theta: number, fockDim: number): Matrix {
@@ -493,6 +529,10 @@ export function applyQumodeGate(
       gate = rotationMatrix(params.theta ?? 0, fockDim);
       break;
     }
+    case 'kerr': {
+      gate = kerrMatrix(params.kappa ?? 0.1, fockDim);
+      break;
+    }
     case 'annihilate': {
       gate = annihilationMatrix(fockDim);
       break;
@@ -529,11 +569,28 @@ export function applyHybridGate(
       gate = controlledRotationMatrix(params.theta ?? Math.PI / 4, fockDim);
       break;
     }
+    case 'jc': {
+      gate = jaynesCouplingMatrix(params.theta ?? Math.PI / 4, fockDim);
+      break;
+    }
     default:
       return state;
   }
 
   return applyTwoSubsystemGate(state, qubitWireIndex, qumodeWireIndex, gate);
+}
+
+// Apply beam splitter gate between two qumode wires
+export function applyBeamSplitter(
+  state: TensorState,
+  wireIndex1: number,
+  wireIndex2: number,
+  theta: number,
+  phi: number,
+  fockDim: number
+): TensorState {
+  const gate = beamSplitterMatrix(theta, phi, fockDim);
+  return applyTwoSubsystemGate(state, wireIndex1, wireIndex2, gate);
 }
 
 // Apply CNOT gate between two qubits

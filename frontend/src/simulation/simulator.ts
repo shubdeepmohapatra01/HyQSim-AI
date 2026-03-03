@@ -8,6 +8,7 @@ import {
   applyQubitGate,
   applyQumodeGate as applyTensorQumodeGate,
   applyHybridGate as applyTensorHybridGate,
+  applyBeamSplitter,
   applyCNOTGate,
   applyCustomGate,
   applyPostSelection,
@@ -16,6 +17,40 @@ import {
   densityMatrixToQumodeState,
   sampleQubitBitstrings,
 } from './tensor';
+
+/**
+ * Given a set of measured wire indices, return their positions in the qubit
+ * bitstring (which is ordered by qubit appearance in the wires array).
+ * Returns positions sorted ascending so the resulting bitstring is consistent.
+ */
+export function getQubitBitstringPositions(wires: Wire[], measuredWireIndices: number[]): number[] {
+  const qubitWireIndices = wires
+    .map((w, i) => ({ wire: w, idx: i }))
+    .filter(({ wire }) => wire.type === 'qubit')
+    .map(({ idx }) => idx);
+
+  return measuredWireIndices
+    .filter(wi => wires[wi]?.type === 'qubit')
+    .map(wi => qubitWireIndices.indexOf(wi))
+    .filter(pos => pos >= 0)
+    .sort((a, b) => a - b);
+}
+
+/**
+ * Marginalize a bitstring count histogram to a subset of bit positions.
+ * E.g. with positions=[0,2], "010"→"00", "011"→"01", etc.
+ */
+export function marginalizeCountsToPositions(
+  counts: Record<string, number>,
+  positions: number[],
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const [bitstring, count] of Object.entries(counts)) {
+    const margBitstring = positions.map(pos => bitstring[pos]).join('');
+    result[margBitstring] = (result[margBitstring] ?? 0) + count;
+  }
+  return result;
+}
 
 // Sort elements by x position (left to right execution)
 function sortElementsByPosition(elements: CircuitElement[]): CircuitElement[] {
@@ -28,7 +63,8 @@ export function runSimulation(
   gates: Map<string, Gate>,
   fockDim: number,
   postSelections: QubitPostSelection[] = [],
-  shots: number = 1024
+  shots: number = 1024,
+  measuredWireIndices: number[] = [],
 ): SimulationResult {
   const startTime = performance.now();
 
@@ -59,6 +95,9 @@ export function runSimulation(
     const wireIndex = element.wireIndex;
     const wire = wires[wireIndex];
 
+    // Measure gates are markers only — no state transformation
+    if (gate.id === 'measure') continue;
+
     if (gate.category === 'qubit' && wire?.type === 'qubit') {
       // Single qubit gate
       if (!gate.numQubits || gate.numQubits === 1) {
@@ -74,10 +113,17 @@ export function runSimulation(
       if (!gate.numQumodes || gate.numQumodes === 1) {
         state = applyTensorQumodeGate(state, wireIndex, gate.id, params, fockDim);
       }
-      // Two-qumode gate (beam splitter) - TODO: implement in tensor.ts
+      // Two-qumode gate (beam splitter)
       else if (gate.numQumodes === 2 && element.targetWireIndices?.length) {
-        // For now, skip beam splitter in tensor mode
-        console.warn('Beam splitter not yet implemented in tensor mode');
+        const targetIndex = element.targetWireIndices[0];
+        state = applyBeamSplitter(
+          state,
+          wireIndex,
+          targetIndex,
+          params.theta ?? Math.PI / 4,
+          params.phi ?? 0,
+          fockDim
+        );
       }
     } else if (gate.category === 'hybrid') {
       // Hybrid gate
@@ -153,10 +199,14 @@ export function runSimulation(
     });
   }
 
-  // Sample qubit bitstrings for measurement histogram
+  // Sample qubit bitstrings — only for explicitly measured qubits
   let bitstringCounts: Record<string, number> | undefined;
-  if (qubitWireIndices.length > 0) {
-    bitstringCounts = sampleQubitBitstrings(state, shots);
+  if (measuredWireIndices.length > 0 && qubitWireIndices.length > 0) {
+    const allCounts = sampleQubitBitstrings(state, shots);
+    const positions = getQubitBitstringPositions(wires, measuredWireIndices);
+    if (positions.length > 0) {
+      bitstringCounts = marginalizeCountsToPositions(allCounts, positions);
+    }
   }
 
   const executionTime = performance.now() - startTime;

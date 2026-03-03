@@ -229,6 +229,18 @@ export const HYBRID_GATES: Gate[] = [
       { name: 'theta', symbol: 'θ', defaultValue: Math.PI / 4, min: 0, max: 2 * Math.PI, step: 0.1, unit: 'rad' },
     ],
   },
+  {
+    id: 'jc',
+    name: 'Jaynes-Cummings',
+    symbol: 'JC',
+    category: 'hybrid',
+    description: 'Jaynes-Cummings coupling e^{-iθ(σ₊a + σ₋a†)}: entangles qubit with qumode via photon exchange',
+    numQubits: 1,
+    numQumodes: 1,
+    parameters: [
+      { name: 'theta', symbol: 'θ', defaultValue: Math.PI / 4, min: -Math.PI, max: Math.PI, step: 0.1, unit: 'rad' },
+    ],
+  },
   // Commented out for now:
   // {
   //   id: 'snap',
@@ -286,7 +298,18 @@ export const CUSTOM_CVDV_GATES: Gate[] = [
 
 export const CUSTOM_GATES: Gate[] = [...CUSTOM_CV_GATES, ...CUSTOM_CVDV_GATES];
 
-export const ALL_GATES = [...QUBIT_GATES, ...QUMODE_GATES, ...HYBRID_GATES, ...CUSTOM_GATES];
+export const MEASURE_GATES: Gate[] = [
+  {
+    id: 'measure',
+    name: 'Measure',
+    symbol: 'M',
+    category: 'qubit',
+    description: 'Measure qubit in the computational (Z) basis',
+    numQubits: 1,
+  },
+];
+
+export const ALL_GATES = [...QUBIT_GATES, ...QUMODE_GATES, ...HYBRID_GATES, ...CUSTOM_GATES, ...MEASURE_GATES];
 
 // Custom generator expression type for parsed expressions
 export type GeneratorType = 'cv' | 'dv' | 'hybrid';
