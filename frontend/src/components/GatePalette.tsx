@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import type { Gate } from '../types/circuit';
-import { QUBIT_GATES, QUMODE_GATES, HYBRID_GATES, CUSTOM_CV_GATES, CUSTOM_CVDV_GATES } from '../types/circuit';
+import { QUBIT_GATES, QUMODE_GATES, HYBRID_GATES, CUSTOM_CV_GATES, CUSTOM_CVDV_GATES, MEASURE_GATES } from '../types/circuit';
 import { parseGeneratorExpression } from '../simulation/customGenerator';
 
 interface SavedCustomGate {
@@ -135,6 +135,14 @@ export default function GatePalette({ onDragStart, savedCustomGates = [], onRemo
   return (
     <div className="bg-slate-800 p-4 rounded-xl h-full overflow-y-auto">
       <h2 className="text-lg font-bold mb-4 text-white">Gate Palette</h2>
+
+      <GateSection
+        title="Measurement"
+        gates={MEASURE_GATES}
+        onDragStart={onDragStart}
+        colorClass="bg-slate-600 text-white"
+        borderColor="border-slate-400"
+      />
 
       <GateSection
         title="Qubit Gates"

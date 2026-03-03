@@ -525,6 +525,15 @@ export default function CircuitCanvas({
 
                     {isHybrid && (
                       <>
+                        {/* Invisible hit area spanning the full gate so hover persists
+                            while moving between the control dot and the gate box */}
+                        <rect
+                          x={gateX - 22}
+                          y={minY - 16}
+                          width={56}
+                          height={maxY - minY + 32}
+                          fill="transparent"
+                        />
                         {/* Control dot on qubit wire */}
                         <circle
                           cx={gateX}
@@ -613,25 +622,14 @@ export default function CircuitCanvas({
                       />
                     )}
 
-                    {/* Delete button on hover */}
+                    {/* Delete button on hover — always at the qubit (top) end */}
                     {isHovered && (
                       <g
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRemoveElement(element.id);
-                        }}
+                        onClick={(e) => { e.stopPropagation(); onRemoveElement(element.id); }}
                         className="cursor-pointer"
                       >
                         <circle cx={gateX + 22} cy={minY - 10} r={10} fill="#dc2626" />
-                        <text
-                          x={gateX + 22}
-                          y={minY - 6}
-                          fill="white"
-                          fontSize={14}
-                          textAnchor="middle"
-                        >
-                          ×
-                        </text>
+                        <text x={gateX + 22} y={minY - 6} fill="white" fontSize={14} textAnchor="middle">×</text>
                       </g>
                     )}
                   </g>
@@ -643,6 +641,57 @@ export default function CircuitCanvas({
               const isCustom = gate.category === 'custom';
               const isClickable = hasParams || isCustom;
               const needsConfig = isCustom && !element.generatorExpression;
+
+              // Quirk-style meter symbol for measure gates
+              if (gate.id === 'measure') {
+                return (
+                  <g
+                    key={element.id}
+                    onMouseEnter={() => setHoveredElement(element.id)}
+                    onMouseLeave={() => setHoveredElement(null)}
+                  >
+                    {/* Gate background */}
+                    <rect
+                      x={gateX - 20} y={primaryY - 20}
+                      width={40} height={40}
+                      fill="#1e293b" rx={6}
+                      stroke={isHovered ? '#94a3b8' : '#475569'}
+                      strokeWidth={isHovered ? 2 : 1}
+                    />
+                    {/* Meter baseline */}
+                    <line
+                      x1={gateX - 12} y1={primaryY + 8}
+                      x2={gateX + 12} y2={primaryY + 8}
+                      stroke="white" strokeWidth={1.5}
+                      className="pointer-events-none"
+                    />
+                    {/* Meter arc — semicircle above baseline */}
+                    <path
+                      d={`M ${gateX - 12} ${primaryY + 8} A 12 12 0 0 1 ${gateX + 12} ${primaryY + 8}`}
+                      fill="none" stroke="white" strokeWidth={1.5}
+                      className="pointer-events-none"
+                    />
+                    {/* Needle pointing upper-right from arc center */}
+                    <line
+                      x1={gateX} y1={primaryY + 8}
+                      x2={gateX + 9} y2={primaryY - 5}
+                      stroke="#fbbf24" strokeWidth={2}
+                      className="pointer-events-none"
+                    />
+                    {/* Delete button on hover */}
+                    {isHovered && (
+                      <g
+                        onClick={(e) => { e.stopPropagation(); onRemoveElement(element.id); }}
+                        className="cursor-pointer"
+                      >
+                        <circle cx={gateX + 25} cy={primaryY + 15} r={10} fill="#dc2626" />
+                        <text x={gateX + 25} y={primaryY + 19} fill="white" fontSize={14} textAnchor="middle">×</text>
+                      </g>
+                    )}
+                  </g>
+                );
+              }
+
               return (
                 <g
                   key={element.id}
