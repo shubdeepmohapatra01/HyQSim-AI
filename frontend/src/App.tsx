@@ -5,6 +5,7 @@ import DisplayPanel from './components/DisplayPanel';
 import GateParameterEditor from './components/GateParameterEditor';
 import ImportExportModal from './components/ImportExportModal';
 import BenchmarkMenu from './components/BenchmarkMenu';
+import ChatPanel from './components/ChatPanel';
 // import RabiPlot from './components/RabiPlot';
 import { BENCHMARKS, recomputeCatCDParams } from './benchmarks/circuits';
 // import { runJCSweep } from './benchmarks/sweep';
@@ -509,48 +510,60 @@ function App() {
       </header>
 
       {/* Main content */}
-      <div className="flex h-[calc(100vh-80px)]">
-        {/* Left sidebar - Gate Palette */}
-        <aside className="w-64 p-4 border-r border-slate-700 overflow-hidden">
-          <GatePalette
-            onDragStart={handleDragStart}
-            savedCustomGates={savedCustomGates}
-            onRemoveCustomGate={handleRemoveCustomGate}
-          />
-        </aside>
+      <div className="flex flex-col h-[calc(100vh-80px)]">
+        <div className="flex flex-1 min-h-0">
+          {/* Left sidebar - Gate Palette */}
+          <aside className="w-64 p-4 border-r border-slate-700 overflow-hidden">
+            <GatePalette
+              onDragStart={handleDragStart}
+              savedCustomGates={savedCustomGates}
+              onRemoveCustomGate={handleRemoveCustomGate}
+            />
+          </aside>
 
-        {/* Center - Circuit Canvas */}
-        <main className="flex-1 p-4 overflow-hidden">
-          <CircuitCanvas
-            wires={wires}
-            elements={elements}
-            onAddWire={handleAddWire}
-            onDropGate={handleDropGate}
-            onRemoveWire={handleRemoveWire}
-            onRemoveElement={handleRemoveElement}
-            onElementClick={handleElementClick}
-            onWireInitialStateChange={handleWireInitialStateChange}
-            gates={gatesMap}
-          />
-        </main>
+          {/* Center - Circuit Canvas */}
+          <main className="flex-1 p-4 overflow-hidden">
+            <CircuitCanvas
+              wires={wires}
+              elements={elements}
+              onAddWire={handleAddWire}
+              onDropGate={handleDropGate}
+              onRemoveWire={handleRemoveWire}
+              onRemoveElement={handleRemoveElement}
+              onElementClick={handleElementClick}
+              onWireInitialStateChange={handleWireInitialStateChange}
+              gates={gatesMap}
+            />
+          </main>
 
-        {/* Right sidebar - Display Panel */}
-        <aside className="w-80 p-4 border-l border-slate-700 overflow-hidden">
-          <DisplayPanel
-            wires={wires}
-            fockTruncation={fockTruncation}
-            onFockTruncationChange={setFockTruncation}
-            simulationResult={simulationResult}
-            onRunSimulation={handleRunSimulation}
-            isSimulating={isSimulating}
-            backend={backend}
-            postSelections={postSelections}
-            onPostSelectionsChange={setPostSelections}
-            shots={shots}
-            onShotsChange={setShots}
-            measuredWireIndices={elements.filter(e => e.gateId === 'measure').map(e => e.wireIndex)}
-          />
-        </aside>
+          {/* Right sidebar - Display Panel */}
+          <aside className="w-80 p-4 border-l border-slate-700 overflow-hidden">
+            <DisplayPanel
+              wires={wires}
+              fockTruncation={fockTruncation}
+              onFockTruncationChange={setFockTruncation}
+              simulationResult={simulationResult}
+              onRunSimulation={handleRunSimulation}
+              isSimulating={isSimulating}
+              backend={backend}
+              postSelections={postSelections}
+              onPostSelectionsChange={setPostSelections}
+              shots={shots}
+              onShotsChange={setShots}
+              measuredWireIndices={elements.filter(e => e.gateId === 'measure').map(e => e.wireIndex)}
+            />
+          </aside>
+        </div>
+
+        {/* AI Chat Panel — docked at the bottom */}
+        <ChatPanel
+          wires={wires}
+          elements={elements}
+          onAddWire={handleAddWire}
+          onDropGate={handleDropGate}
+          onRemoveElement={handleRemoveElement}
+          onClearCanvas={handleClearCanvas}
+        />
       </div>
 
       {/* Gate Parameter Editor Modal */}

@@ -12,5 +12,22 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true, // Error instead of picking a different port
+    proxy: {
+      '/proxy/anthropic': {
+        target: 'https://api.anthropic.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/proxy\/anthropic/, ''),
+      },
+      '/proxy/google': {
+        target: 'https://generativelanguage.googleapis.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/proxy\/google/, ''),
+      },
+      '/proxy/groq': {
+        target: 'https://api.groq.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/proxy\/groq/, ''),
+      },
+    },
   },
 })
