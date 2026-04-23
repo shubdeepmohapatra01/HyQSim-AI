@@ -11,7 +11,7 @@ export default defineConfig({
   base: process.env.VITE_BASE_PATH || '/',
   server: {
     port: 5173,
-    strictPort: true, // Error instead of picking a different port
+    strictPort: false, // Fall back to next available port if 5173 is in use
     proxy: {
       '/proxy/anthropic': {
         target: 'https://api.anthropic.com',
