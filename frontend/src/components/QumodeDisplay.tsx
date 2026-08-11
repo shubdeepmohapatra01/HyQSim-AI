@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { QumodeState } from '../types/circuit';
+import {
+  computeWignerFunction,
+  computeWignerFromDensityMatrix,
+  computeQuadratureExpectations,
+} from '../simulation/wigner';
 
 type DisplayMode = 'fock' | 'wigner' | 'xdist' | 'pdist';
 
@@ -355,20 +360,6 @@ function createVacuumAmplitudes(fockDim: number): { re: number; im: number }[] {
   return Array.from({ length: fockDim }, (_, n) => ({ re: n === 0 ? 1 : 0, im: 0 }));
 }
 
-/**
- * g=2 convention: x̂ = a+a†, p̂ = i(a†−a)
- * ⟨x̂⟩ = 2·Re(A),  ⟨p̂⟩ = 2·Im(A)
- * where A = Σ_{n=1}^{N-1} c_{n-1}* · c_n · √n
- */
-function computeQuadratureExpectations(amplitudes: { re: number; im: number }[]): { xMean: number; pMean: number } {
-  let reA = 0, imA = 0;
-  for (let n = 1; n < amplitudes.length; n++) {
-    const sqrtN = Math.sqrt(n);
-    reA += (amplitudes[n - 1].re * amplitudes[n].re + amplitudes[n - 1].im * amplitudes[n].im) * sqrtN;
-    imA += (amplitudes[n - 1].re * amplitudes[n].im - amplitudes[n - 1].im * amplitudes[n].re) * sqrtN;
-  }
-  return { xMean: 2 * reA, pMean: 2 * imA };
-}
 
 /**
  * Harmonic-oscillator basis functions at point x using the g=2 normalised recurrence:
@@ -442,140 +433,4 @@ function computeMomentumDistribution(
     result.push({ q: p, prob: re * re + im * im });
   }
   return result;
-}
-
-// ── Wigner function computation ───────────────────────────────────────────────
-//
-// g=2 convention: x̂ = a+a†, p̂ = i(a†−a), vacuum variance = 1 in each quadrature.
-// Coordinates (X,P) in the Wigner function are eigenvalues of x̂_g2 and p̂_g2.
-//
-// Correct formula:  W_n(X,P) = (1/2π)(−1)^n L_n(R²) exp(−R²/2)   where R²=X²+P²
-// Off-diagonal:     W_{mn}   = (1/2π)(−1)^m √(m!/n!) (X−iP)^{n-m} L_m^{n-m}(R²) exp(−R²/2)
-//
-// Vacuum check: W_0 = (1/2π)exp(−R²/2), ⟨x̂²⟩ = ∫ X² W_0 dX dP = 1  ✓
-
-function computeWignerFunction(
-  amplitudes: { re: number; im: number }[],
-  gridSize: number,
-  range: number,
-): number[][] {
-  const wigner: number[][] = [];
-  const fockDim = amplitudes.length;
-  const factorials: number[] = [1];
-  for (let i = 1; i < fockDim; i++) factorials[i] = factorials[i - 1] * i;
-
-  for (let ix = 0; ix < gridSize; ix++) {
-    wigner[ix] = [];
-    const x = ((ix + 0.5) / gridSize - 0.5) * 2 * range;
-    for (let ip = 0; ip < gridSize; ip++) {
-      const p  = ((ip + 0.5) / gridSize - 0.5) * 2 * range;
-      const r2 = x * x + p * p;
-      const pf = (1 / (2 * Math.PI)) * Math.exp(-r2 / 2);  // g=2 convention
-      let W = 0;
-      // Diagonal
-      for (let n = 0; n < fockDim; n++) {
-        const prob = amplitudes[n].re ** 2 + amplitudes[n].im ** 2;
-        W += pf * ((n % 2 === 0) ? 1 : -1) * laguerre(n, r2) * prob;
-      }
-      // Off-diagonal: power = (X − iP)^k  (no √2 factor in g=2)
-      for (let n = 0; n < fockDim; n++) {
-        for (let m = 0; m < n; m++) {
-          const rhoRe = amplitudes[m].re * amplitudes[n].re + amplitudes[m].im * amplitudes[n].im;
-          const rhoIm = amplitudes[m].im * amplitudes[n].re - amplitudes[m].re * amplitudes[n].im;
-          if (Math.abs(rhoRe) < 1e-15 && Math.abs(rhoIm) < 1e-15) continue;
-          const k    = n - m;
-          const sf   = Math.sqrt(factorials[m] / factorials[n]);
-          const Lmk  = associatedLaguerre(m, k, r2);
-          const sign = (m % 2 === 0) ? 1 : -1;
-          let powRe = 1, powIm = 0;
-          for (let i = 0; i < k; i++) {
-            [powRe, powIm] = [
-              powRe * x + powIm * p,
-              powIm * x - powRe * p,
-            ];
-          }
-          W += 2 * (rhoRe * pf * sign * sf * Lmk * powRe - rhoIm * pf * sign * sf * Lmk * powIm);
-        }
-      }
-      wigner[ix][ip] = W;
-    }
-  }
-  return wigner;
-}
-
-function computeWignerFromDensityMatrix(
-  rho: { re: number; im: number }[][],
-  gridSize: number,
-  range: number,
-): number[][] {
-  const wigner: number[][] = [];
-  const fockDim = rho.length;
-  const factorials: number[] = [1];
-  for (let i = 1; i < fockDim; i++) factorials[i] = factorials[i - 1] * i;
-
-  for (let ix = 0; ix < gridSize; ix++) {
-    wigner[ix] = [];
-    const x = ((ix + 0.5) / gridSize - 0.5) * 2 * range;
-    for (let ip = 0; ip < gridSize; ip++) {
-      const p  = ((ip + 0.5) / gridSize - 0.5) * 2 * range;
-      const r2 = x * x + p * p;
-      const pf = (1 / (2 * Math.PI)) * Math.exp(-r2 / 2);  // g=2 convention
-      let W = 0;
-      for (let m = 0; m < fockDim; m++) {
-        for (let n = 0; n < fockDim; n++) {
-          const rRe = rho[m][n].re, rIm = rho[m][n].im;
-          if (Math.abs(rRe) < 1e-15 && Math.abs(rIm) < 1e-15) continue;
-          if (m === n) {
-            W += pf * ((n % 2 === 0) ? 1 : -1) * laguerre(n, r2) * rRe;
-          } else if (m < n) {
-            // ρ_{mn} term: power = (X−iP)^{n-m}
-            const k   = n - m;
-            const sf  = Math.sqrt(factorials[m] / factorials[n]);
-            const Lmk = associatedLaguerre(m, k, r2);
-            const sign = (m % 2 === 0) ? 1 : -1;
-            let powRe = 1, powIm = 0;
-            for (let i = 0; i < k; i++) {
-              [powRe, powIm] = [
-                powRe * x + powIm * p,
-                powIm * x - powRe * p,
-              ];
-            }
-            W += rRe * pf * sign * sf * Lmk * powRe - rIm * pf * sign * sf * Lmk * powIm;
-          } else {
-            // ρ_{mn} with m>n term: power = (X+iP)^{m-n}  (complex conjugate)
-            const k   = m - n;
-            const sf  = Math.sqrt(factorials[n] / factorials[m]);
-            const Lnk = associatedLaguerre(n, k, r2);
-            const sign = (n % 2 === 0) ? 1 : -1;
-            let powRe = 1, powIm = 0;
-            for (let i = 0; i < k; i++) {
-              [powRe, powIm] = [
-                powRe * x - powIm * p,
-                powIm * x + powRe * p,
-              ];
-            }
-            W += rRe * pf * sign * sf * Lnk * powRe - rIm * pf * sign * sf * Lnk * powIm;
-          }
-        }
-      }
-      wigner[ix][ip] = W;
-    }
-  }
-  return wigner;
-}
-
-function laguerre(n: number, x: number): number {
-  if (n === 0) return 1;
-  if (n === 1) return 1 - x;
-  let L0 = 1, L1 = 1 - x;
-  for (let k = 2; k <= n; k++) { const L2 = ((2*k-1-x)*L1 - (k-1)*L0)/k; L0=L1; L1=L2; }
-  return L1;
-}
-
-function associatedLaguerre(n: number, k: number, x: number): number {
-  if (n === 0) return 1;
-  if (n === 1) return 1 + k - x;
-  let L0 = 1, L1 = 1 + k - x;
-  for (let m = 2; m <= n; m++) { const L2 = ((2*m-1+k-x)*L1 - (m-1+k)*L0)/m; L0=L1; L1=L2; }
-  return L1;
 }
