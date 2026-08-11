@@ -1,11 +1,10 @@
 /**
  * Benchmark sweep utilities — run a benchmark circuit for k = 0..nSteps
  * and record expectation values at each step, for time-series visualisation.
+ *
+ * NOTE: This module is currently disabled because jcTrotterCircuit and the
+ * Rabi-plot feature are commented out. Kept for future re-enablement.
  */
-
-import { ALL_GATES } from '../types/circuit';
-import { runSimulation } from '../simulation/simulator';
-import { jcTrotterCircuit } from './circuits';
 
 export interface JCSweepPoint {
   step: number;
@@ -16,45 +15,15 @@ export interface JCSweepPoint {
   szExact: number; // −cos(2t) — same convention
 }
 
-/**
- * Run the JC Trotter circuit for k = 0, 1, ..., nSteps steps,
- * extracting ⟨n̂⟩ and ⟨σ_z⟩ at each step.
- *
- * The exact formulas sin²(k·g·τ) and −cos(2k·g·τ) hold for any ω:
- * R(ω·τ) commutes with n̂, and Rz(ω·τ) commutes with Z, so free evolution
- * adds only phases and leaves the photon-number and population inversion unchanged.
- */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function runJCSweep(
-  nSteps: number,
-  g: number,
-  omega: number,
-  tau: number,
-  fockDim: number,
+  _nSteps: number,
+  _g: number,
+  _omega: number,
+  _tau: number,
+  _fockDim: number,
 ): JCSweepPoint[] {
-  const gatesMap = new Map(ALL_GATES.map(gate => [gate.id, gate]));
-  const points: JCSweepPoint[] = [];
-
-  for (let k = 0; k <= nSteps; k++) {
-    const { wires, elements } = jcTrotterCircuit(k, g, omega, tau, fockDim);
-    const t = k * g * tau;
-
-    const result = runSimulation(wires, elements, gatesMap, fockDim);
-
-    const qumodeIdx = wires.findIndex(w => w.type === 'qumode');
-    const qubitIdx  = wires.findIndex(w => w.type === 'qubit');
-
-    const nSim  = result.qumodeStates.get(qumodeIdx)?.meanPhotonNumber ?? 0;
-    const szSim = result.qubitStates.get(qubitIdx)?.expectations.sigmaZ ?? 0;
-
-    points.push({
-      step:    k,
-      t,
-      nSim,
-      nExact:  Math.sin(t) ** 2,
-      szSim,
-      szExact: -Math.cos(2 * t),
-    });
-  }
-
-  return points;
+  // Disabled: jcTrotterCircuit is currently commented out in circuits.ts.
+  // Restore the implementation here when the Rabi-plot feature is re-enabled.
+  return [];
 }

@@ -4,8 +4,8 @@
 import type { Complex, StateVector, Matrix } from './complex';
 import {
   complex, ONE, ZERO,
-  add, mul, conj, abs2,
-  normalize, identity,
+  add, sub, mul, conj, abs2,
+  normalize,
 } from './complex';
 import { GATES, Rx, Ry, Rz, CNOT } from './qubit';
 import { displacementMatrix, squeezingMatrix, rotationMatrix, kerrMatrix, annihilationMatrix, creationMatrix, beamSplitterMatrix } from './qumode';
