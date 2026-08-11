@@ -29,6 +29,7 @@ Schrödinger cat state and back out again through the AI.
 | **[WALKTHROUGH.md](WALKTHROUGH.md)** | Step-by-step tour. Start here |
 | **[AI_GUIDE.md](AI_GUIDE.md)** | The AI assistant in full: both connection modes, keyword glossary, circuit notation, token costs, testing |
 | **[CHANGELOG.md](CHANGELOG.md)** | What changed in the AI overhaul, and why |
+| **[NEXT_STEPS.md](NEXT_STEPS.md)** | Open threads, known gaps, and constraints to preserve |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Development setup and workflow |
 
 ## Overview
