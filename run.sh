@@ -51,11 +51,45 @@ pid_alive() {
 start_backend() {
     echo "Starting Python backend on port 8000..."
     cd "$PROJECT_DIR/backend"
+
     if is_windows; then
-        source "venv/Scripts/activate"
+        VENV_ACTIVATE="venv/Scripts/activate"
     else
-        source "venv/bin/activate"
+        VENV_ACTIVATE="venv/bin/activate"
     fi
+
+    # Without this the activate fails, uvicorn runs against a Python with no fastapi, and
+    # the backend dies silently — while the frontend starts fine. Since the browser
+    # simulator and the in-app AI chat both work without a backend, nothing looks wrong
+    # until you try the Python backend or MCP.
+    if [ ! -f "$VENV_ACTIVATE" ]; then
+        echo ""
+        echo "  ⚠  No Python venv at backend/venv — skipping the backend."
+        echo ""
+        echo "     Not needed for: the browser simulator, or the in-app AI chat with your"
+        echo "     own API key. Both work without it."
+        echo ""
+        echo "     Needed for: the bosonic-qiskit backend, the MCP server, and server-side"
+        echo "     API keys. To set it up:"
+        echo ""
+        echo "         cd backend"
+        echo "         python3 -m venv venv"
+        echo "         source venv/bin/activate"
+        echo "         pip install -r requirements.txt"
+        echo ""
+        return 1
+    fi
+
+    source "$VENV_ACTIVATE"
+
+    if ! python -c "import fastapi" 2>/dev/null; then
+        echo ""
+        echo "  ⚠  backend/venv exists but fastapi is not installed — skipping the backend."
+        echo "     Fix with: cd backend && source venv/bin/activate && pip install -r requirements.txt"
+        echo ""
+        return 1
+    fi
+
     uvicorn main:app --reload --port 8000 &
     local pid=$!
     echo "$pid" > "$BACKEND_PID_FILE"

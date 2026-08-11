@@ -6,12 +6,22 @@ pydantic>=2.0.0
 # CORS for frontend communication
 python-multipart>=0.0.6
 
+# Async HTTP client (for AI provider proxy)
+httpx>=0.27.0
+
+# .env loading (handles quotes / export prefixes correctly)
+python-dotenv>=1.0.0
+
 # Quantum simulation
 qiskit>=1.0.0
 qiskit-aer>=0.13.0
 # Install bosonic-qiskit from local clone or GitHub:
 # pip install -e ../bosonic-qiskit
 # OR: pip install git+https://github.com/C2QA/bosonic-qiskit.git
+
+# MCP server — lets Claude Desktop / Claude Code drive the simulator
+# (optional; only needed to run backend/mcp_server.py)
+mcp>=2.0.0
 
 # Numerical and visualization
 numpy>=1.24.0
