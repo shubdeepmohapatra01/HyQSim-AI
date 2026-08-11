@@ -7,7 +7,7 @@
 
 import type { Wire, CircuitElement } from '../types/circuit';
 
-interface BenchmarkCircuit {
+export interface BenchmarkCircuit {
   wires: Wire[];
   elements: CircuitElement[];
   fockTruncation: number;
@@ -320,7 +320,13 @@ export const BENCHMARKS: BenchmarkDefinition[] = [
     id: 'cat-state',
     name: 'Cat State',
     description: 'Superposition of coherent states |α⟩ + |−α⟩',
-    build: () => catStateCircuit(),
+    // α is the coherent amplitude of the cat, not the CD gate's alpha_re — the circuit
+    // uses CD(α/√2). Exposed as a parameter so "build a cat state with alpha=2" can be
+    // honoured exactly rather than approximated.
+    params: [
+      { name: 'alpha', label: 'Coherent amplitude (α)', defaultValue: 2 * Math.SQRT2, min: 0.1, max: 6, step: 0.1 },
+    ],
+    build: (p) => catStateCircuit(p?.alpha ?? 2 * Math.SQRT2),
   },
   {
     id: 'cv-to-dv',
