@@ -1,169 +1,333 @@
-import type { Gate, Wire, CircuitElement } from '../types/circuit';
-import { ALL_GATES, getDefaultParameters } from '../types/circuit';
-import { wireLabelToIndex } from './circuitToPrompt';
+import type { Wire, CircuitElement } from '../types/circuit';
+import { buildBenchmark, encodeBenchmarkReference } from './benchmarks';
+import {
+  placeGate,
+  decodeWires,
+  decodeGates,
+  resolveElementRef,
+  encodeGateReference,
+  availableWireLabels,
+} from './hqc';
 
-const _gatesMap = new Map(ALL_GATES.map(g => [g.id, g]));
+/**
+ * The system prompt is sent on every single request, so every line here is paid for many
+ * times over.
+ *
+ * It is assembled per intent rather than being one fixed block. An explain or analyze
+ * request cannot modify the circuit — ChatPanel refuses mutating tools outright for those
+ * intents — so shipping the gate catalogue, the benchmark list and the build rules on
+ * those requests is pure waste. They are the most common requests, so this matters.
+ */
 
-const GATE_REFERENCE = ALL_GATES.map(g => {
-  const params = g.parameters?.map(p => `${p.name}=${p.defaultValue}`).join(', ');
-  return `  ${g.id}: ${g.name}${params ? ` (params: ${params})` : ''}`;
-}).join('\n');
+const HEADER =
+  'You are the circuit assistant for HyQSim, a hybrid CV-DV (continuous-variable / discrete-variable) quantum circuit simulator.';
 
-export const SYSTEM_PROMPT = `You are a quantum circuit assistant for HyQSim, a hybrid CV-DV (continuous-variable / discrete-variable) quantum circuit simulator.
+/** Always needed: without it the model cannot read the [Canvas:] snapshot. */
+const NOTATION = `## Notation (HQC)
+q0 q1 ... = qubits, m0 m1 ... = qumodes.
+Gates: "<id> <wire>[><target>] [params]", joined by ";". Params are positional in the gate's
+declared order, comma-separated, omitted for defaults. Radians; pi, pi/2, 3pi/4 accepted.
+Example: "h q0; cnot q0>q1; displace m0 1,0; cdisp q0>m0 2,0"
+Gates on the canvas are numbered #1, #2 ... left to right. Refer to them by that number.`;
 
-Help users build and understand hybrid quantum circuits. When building or modifying a circuit, use the provided tools.
+/** Build-only: an intent that cannot place a gate has no use for any of this. */
+const BUILD_RULES = `Initial states are optional and rarely wanted ("q0=+" = |+>, "m0=3" = Fock |3>). Qumodes
+start in VACUUM unless the user asks for a Fock/number state. A coherent amplitude like
+"alpha=2" is a GATE PARAMETER, never an initial state — writing "m0=2" for it is wrong.
 
-Available gates:
-${GATE_REFERENCE}
+## Rules
+1. If "Known circuits" covers the request, call load_benchmark. Do NOT rebuild those from
+   memory — their exact gate sequences are longer than you expect and you will get them wrong.
+2. Otherwise call build_circuit ONCE with the whole circuit. Never add gates one at a time.
+3. To EDIT, use add_gate / remove_gate / add_wire. Do not rebuild.
+4. NEVER state a number absent from [Simulation:]. You do not compute physics; HyQSim does.
+5. A "CHECK:" line in a tool result means the circuit is likely wrong. Fix it before replying.
+6. Tool calls go through the tool interface only, never as text or XML.
 
-Wire naming: qubits → q0, q1, ...; qumodes (bosonic modes) → m0, m1, ...
+## Known circuits (load_benchmark, do not rebuild)
+${encodeBenchmarkReference()}
 
-Multi-wire gate rules:
-- cnot: wireLabel=control qubit, targetWireLabel=target qubit
-- bs (beam splitter): wireLabel=first qumode, targetWireLabel=second qumode
-- cdisp, xcdisp, ycdisp (conditional displacement): wireLabel=qubit, targetWireLabel=qumode
-- cr (conditional rotation): wireLabel=qubit, targetWireLabel=qumode
-- jc (Jaynes-Cummings): wireLabel=qubit, targetWireLabel=qumode
+## Gates
+Lane signature in brackets. "!py" = browser backend only, not bosonic-qiskit.
+${encodeGateReference()}
+Order: cnot control>target; bs qumode>qumode; cdisp/xcdisp/ycdisp/cr/jc ALWAYS qubit>qumode.`;
 
-When building a circuit from scratch: call add_wire to create the wires first, then add_gate.
-When asked to explain or describe the current circuit: call read_circuit first.
-Angles are in radians (π ≈ 3.14159, π/2 ≈ 1.5708, π/4 ≈ 0.7854).
-For cat state circuits: use H on qubit, then cdisp (conditional displacement) coupling qubit to qumode.`;
+/** Read-only: the rules that still apply when the model may not touch the canvas. */
+const READONLY_RULES = `## Rules
+1. [Canvas:] and [Simulation:] at the top of the message are current truth, whatever earlier
+   turns said. Answer from them — do not call read_circuit.
+2. This is a read-only request. Do NOT modify the circuit; those tools will be refused.
+3. NEVER state a number absent from [Simulation:]. You do not compute physics; HyQSim does.
+   If you need numbers and have none, call run_simulation.`;
+
+const EXPLAINING = `## Explaining
+Name the state (cat, GHZ, squeezed vacuum...) rather than listing gates. Use the data as
+evidence: Fock shape, <n>, Bloch vector, Wigner summary (neg = negativity volume, lobes,
+fringes, varX/varP against vacuum 1.00). Say why the circuit produces it. One physicist to
+another: precise, intuitive, not pedantic. Under 200 words unless asked for more.`;
+
+export type PromptIntent = 'build' | 'explain' | 'analyze';
+
+export function buildSystemPrompt(intent: PromptIntent): string {
+  const parts = intent === 'build'
+    ? [HEADER, NOTATION, BUILD_RULES, EXPLAINING]
+    : [HEADER, NOTATION, READONLY_RULES, EXPLAINING];
+  return parts.join('\n\n');
+}
+
+/** Kept for callers that want the full prompt (the budget harness, docs). */
+export const SYSTEM_PROMPT = buildSystemPrompt('build');
 
 export const AI_TOOLS = [
   {
-    name: 'read_circuit',
-    description: 'Get the current circuit state as a readable description.',
-    input_schema: { type: 'object' as const, properties: {}, required: [] },
-  },
-  {
-    name: 'add_wire',
-    description: 'Add a new wire to the circuit.',
+    name: 'load_benchmark',
+    description:
+      "Load one of HyQSim's verified circuits. Prefer over build_circuit whenever it applies.",
     input_schema: {
       type: 'object' as const,
       properties: {
-        type: { type: 'string', enum: ['qubit', 'qumode'], description: 'Wire type' },
+        benchmarkId: { type: 'string', description: '"cat-state", "cv-to-dv", "dv-to-cv"' },
+        parameters: { type: 'object', additionalProperties: { type: 'number' } },
       },
-      required: ['type'],
+      required: ['benchmarkId'],
+    },
+  },
+  {
+    name: 'build_circuit',
+    description: 'Create or replace the whole circuit in one call. Use for any "build a X" request that load_benchmark does not cover.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        wires: { type: 'string', description: 'e.g. "q0 q1 q2" or "q0=+ m0=2"' },
+        gates: { type: 'string', description: 'e.g. "h q0; cnot q0>q1; displace m0 1.5,0". "" for none.' },
+        replace: { type: 'boolean', description: 'Default true. False extends the current circuit.' },
+      },
+      required: ['wires', 'gates'],
     },
   },
   {
     name: 'add_gate',
-    description: 'Place a gate on the circuit.',
+    description: 'Append one gate. Edits only.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        gateId: { type: 'string', description: 'Gate ID from the available gates list (e.g. "h", "x", "displace", "cdisp")' },
-        wireLabel: { type: 'string', description: 'Primary wire label, e.g. "q0" or "m0"' },
-        targetWireLabel: { type: 'string', description: 'Second wire label for multi-wire gates (cnot, bs, cdisp, cr, jc, etc.)' },
-        parameters: {
-          type: 'object',
-          description: 'Gate parameter overrides as key-value pairs (e.g. {"theta": 1.5708}). Omit to use defaults.',
-          additionalProperties: { type: 'number' },
-        },
+        gateId: { type: 'string' },
+        wireLabel: { type: 'string', description: 'Primary wire; the qubit for hybrid gates.' },
+        targetWireLabel: { type: 'string', description: 'Second wire; the qumode for hybrid gates.' },
+        parameters: { type: 'object', additionalProperties: { type: 'number' } },
       },
       required: ['gateId', 'wireLabel'],
     },
   },
   {
     name: 'remove_gate',
-    description: 'Remove a gate from the circuit by its element ID (shown in read_circuit output).',
+    description: 'Delete one gate.',
     input_schema: {
       type: 'object' as const,
-      properties: {
-        elementId: { type: 'string', description: 'Element ID from read_circuit, e.g. "element-1234"' },
-      },
-      required: ['elementId'],
+      properties: { ref: { type: 'string', description: 'Its canvas number, e.g. "#3".' } },
+      required: ['ref'],
+    },
+  },
+  {
+    name: 'add_wire',
+    description: 'Append one wire.',
+    input_schema: {
+      type: 'object' as const,
+      properties: { wireType: { type: 'string', enum: ['qubit', 'qumode'] } },
+      required: ['wireType'],
     },
   },
   {
     name: 'clear_circuit',
-    description: 'Remove all gates and wires from the circuit.',
+    description: 'Delete everything.',
+    input_schema: { type: 'object' as const, properties: {}, required: [] },
+  },
+  {
+    name: 'read_circuit',
+    description: 'Re-read the canvas. Rarely needed; the snapshot is already current.',
+    input_schema: { type: 'object' as const, properties: {}, required: [] },
+  },
+  {
+    name: 'run_simulation',
+    description: "Run HyQSim's simulator and return its results. Never compute results yourself.",
     input_schema: { type: 'object' as const, properties: {}, required: [] },
   },
 ];
 
-export type CircuitMutation =
-  | { type: 'add_wire'; wireType: 'qubit' | 'qumode' }
-  | { type: 'add_gate'; gate: Gate; wireIndex: number; position: { x: number; y: number }; targetWireIndices?: number[]; parameterValues?: Record<string, number> }
-  | { type: 'remove_gate'; elementId: string }
-  | { type: 'clear_circuit' }
-  | { type: 'read_circuit' };
+/** Tool names that change the canvas — used to reject mutations during explain/analyze. */
+export const MUTATING_TOOLS = new Set(['build_circuit', 'load_benchmark', 'add_gate', 'remove_gate', 'add_wire', 'clear_circuit']);
 
+/**
+ * The tools to advertise for an intent.
+ *
+ * Tool schemas are re-serialized into every request, so offering tools that would be
+ * refused anyway is paid for on every turn. For read-only intents the mutating tools are
+ * dropped entirely — which also removes the temptation to call them, so the guard fires
+ * less often.
+ */
+export function toolsForIntent(intent: PromptIntent): typeof AI_TOOLS {
+  if (intent === 'build') return AI_TOOLS;
+  return AI_TOOLS.filter(t => !MUTATING_TOOLS.has(t.name));
+}
+
+export type CircuitMutation =
+  | { type: 'build_circuit'; wires: Wire[]; elements: CircuitElement[]; replace: boolean }
+  | { type: 'load_benchmark'; benchmarkId: string; wires: Wire[]; elements: CircuitElement[]; fockTruncation: number }
+  | { type: 'add_gate'; element: CircuitElement }
+  | { type: 'remove_gate'; elementId: string; ref: string }
+  | { type: 'add_wire'; wireType: 'qubit' | 'qumode' }
+  | { type: 'clear_circuit' }
+  | { type: 'read_circuit' }
+  | { type: 'run_simulation' };
+
+type ParseResult =
+  | { mutation: CircuitMutation; error: null }
+  | { mutation: null; error: string };
+
+/** Reads a value under any of several spellings — models are inconsistent about casing. */
+function pick(input: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const k of keys) {
+    if (input[k] !== undefined && input[k] !== null) return input[k];
+  }
+  return undefined;
+}
+
+/**
+ * Validates a tool call against the current circuit and produces a mutation.
+ *
+ * Error strings are self-correcting prompts: they name the valid options so the model can
+ * fix its own mistake on the next turn without a human intervening.
+ */
 export function parseToolCall(
   name: string,
   input: Record<string, unknown>,
   wires: Wire[],
   elements: CircuitElement[],
-): { mutation: CircuitMutation; error: null } | { mutation: null; error: string } {
+): ParseResult {
   switch (name) {
     case 'read_circuit':
       return { mutation: { type: 'read_circuit' }, error: null };
 
+    case 'run_simulation':
+      return { mutation: { type: 'run_simulation' }, error: null };
+
     case 'clear_circuit':
       return { mutation: { type: 'clear_circuit' }, error: null };
 
+    case 'load_benchmark': {
+      const id = String(pick(input, 'benchmarkId', 'benchmark_id', 'benchmark', 'id') ?? '').trim();
+      const raw = pick(input, 'parameters', 'params') as Record<string, unknown> | undefined;
+
+      const params: Record<string, number> = {};
+      for (const [k, v] of Object.entries(raw ?? {})) {
+        const n = typeof v === 'number' ? v : Number(v);
+        if (Number.isNaN(n)) {
+          return { mutation: null, error: `Benchmark parameter "${k}" must be a number, got "${String(v)}".` };
+        }
+        params[k] = n;
+      }
+
+      const result = buildBenchmark(id, Object.keys(params).length > 0 ? params : undefined);
+      if (result.circuit === null) return { mutation: null, error: result.error as string };
+
+      return {
+        mutation: {
+          type: 'load_benchmark',
+          benchmarkId: id,
+          wires: result.circuit.wires,
+          elements: result.circuit.elements,
+          fockTruncation: result.circuit.fockTruncation,
+        },
+        error: null,
+      };
+    }
+
+    case 'build_circuit': {
+      const wireSpec = String(pick(input, 'wires', 'wire', 'wireSpec', 'wire_spec') ?? '');
+      const gateSpec = String(pick(input, 'gates', 'gate', 'gateSpec', 'gate_spec', 'circuit') ?? '');
+      const replaceRaw = pick(input, 'replace', 'clear');
+      const replace = replaceRaw === undefined ? true : replaceRaw !== false && replaceRaw !== 'false';
+
+      if (wireSpec.trim() === '') {
+        return { mutation: null, error: 'build_circuit needs a "wires" spec, e.g. "q0 q1" or "q0 m0".' };
+      }
+
+      const { wires: newWires, errors: wireErrors } = decodeWires(wireSpec);
+      if (wireErrors.length > 0) {
+        return { mutation: null, error: wireErrors.join(' ') };
+      }
+      if (newWires.length === 0) {
+        return { mutation: null, error: `Could not read any wires from "${wireSpec}". Use labels like "q0 q1 m0".` };
+      }
+
+      // When extending rather than replacing, new gates must resolve against the union.
+      const baseWires = replace ? newWires : [...wires, ...newWires];
+      const baseElements = replace ? [] : elements;
+
+      const { elements: newElements, errors: gateErrors } = decodeGates(gateSpec, baseWires, baseElements);
+      if (gateErrors.length > 0) {
+        return { mutation: null, error: gateErrors.join(' ') };
+      }
+
+      return {
+        mutation: {
+          type: 'build_circuit',
+          wires: baseWires,
+          elements: replace ? newElements : [...baseElements, ...newElements],
+          replace,
+        },
+        error: null,
+      };
+    }
+
     case 'add_wire': {
-      const wt = input.type as string;
+      const wt = String(pick(input, 'wireType', 'type', 'wire_type') ?? '').toLowerCase();
       if (wt !== 'qubit' && wt !== 'qumode') {
-        return { mutation: null, error: `Invalid wire type: "${input.type}". Must be "qubit" or "qumode".` };
+        return { mutation: null, error: `Invalid wire type "${wt}". Must be "qubit" or "qumode".` };
       }
       return { mutation: { type: 'add_wire', wireType: wt }, error: null };
     }
 
     case 'remove_gate': {
-      const eid = input.elementId as string;
-      if (!elements.some(e => e.id === eid)) {
-        return { mutation: null, error: `No gate with id "${eid}". Call read_circuit to get current element IDs.` };
+      const ref = String(pick(input, 'ref', 'elementId', 'element_id', 'index', 'gate') ?? '');
+      if (elements.length === 0) {
+        return { mutation: null, error: 'There are no gates on the canvas to remove.' };
       }
-      return { mutation: { type: 'remove_gate', elementId: eid }, error: null };
+      const id = resolveElementRef(ref, elements);
+      if (!id) {
+        return { mutation: null, error: `No gate "${ref}". The canvas has gates #1 to #${elements.length}.` };
+      }
+      return { mutation: { type: 'remove_gate', elementId: id, ref }, error: null };
     }
 
     case 'add_gate': {
-      const gateId = input.gateId as string;
-      const gate = _gatesMap.get(gateId);
-      if (!gate) {
-        return { mutation: null, error: `Unknown gate id: "${gateId}". Valid IDs: ${[..._gatesMap.keys()].join(', ')}` };
+      if (wires.length === 0) {
+        return { mutation: null, error: 'The circuit has no wires yet. Call build_circuit, or add_wire first.' };
+      }
+      const gateId = String(pick(input, 'gateId', 'gate_id', 'gate_type', 'gate', 'id') ?? '');
+      const wl = String(pick(input, 'wireLabel', 'wire_label', 'wire', 'target') ?? '');
+      const tlRaw = pick(input, 'targetWireLabel', 'target_wire_label', 'targetWire', 'target_wire');
+      const params = pick(input, 'parameters', 'params', 'parameterValues');
+
+      if (wl === '') {
+        return { mutation: null, error: `add_gate needs a wireLabel. Current wires: ${availableWireLabels(wires)}` };
       }
 
-      const wl = input.wireLabel as string;
-      const wireIndex = wireLabelToIndex(wires, wl);
-      if (wireIndex === -1) {
-        return { mutation: null, error: `Wire "${wl}" not found. Current wires: ${wires.length === 0 ? 'none (call add_wire first)' : wires.map((_, i) => { const w = wires[i]; const tc = wires.slice(0, i).filter(x => x.type === w.type).length; return w.type === 'qubit' ? `q${tc}` : `m${tc}`; }).join(', ')}` };
-      }
-
-      let targetWireIndices: number[] | undefined;
-      if (input.targetWireLabel) {
-        const tl = input.targetWireLabel as string;
-        const ti = wireLabelToIndex(wires, tl);
-        if (ti === -1) {
-          return { mutation: null, error: `Target wire "${tl}" not found.` };
-        }
-        targetWireIndices = [ti];
-      }
-
-      const wire = wires[wireIndex];
-      if (gate.category === 'qubit' && !gate.numQumodes && wire.type !== 'qubit') {
-        return { mutation: null, error: `Gate "${gateId}" requires a qubit wire, but "${wl}" is a qumode.` };
-      }
-      if (gate.category === 'qumode' && !gate.numQubits && wire.type !== 'qumode') {
-        return { mutation: null, error: `Gate "${gateId}" requires a qumode wire, but "${wl}" is a qubit.` };
-      }
-
-      const defaults = getDefaultParameters(gate);
-      const overrides = (input.parameters as Record<string, number>) ?? {};
-      const parameterValues = { ...defaults, ...overrides };
-
-      const maxX = elements.length > 0 ? Math.max(...elements.map(e => e.position.x)) : -60;
-      const position = { x: maxX + 80, y: 0 };
-
-      return {
-        mutation: { type: 'add_gate', gate, wireIndex, position, targetWireIndices, parameterValues },
-        error: null,
-      };
+      const result = placeGate(
+        {
+          gateId,
+          wireLabel: wl,
+          targetWireLabel: tlRaw === undefined ? undefined : String(tlRaw),
+          parameters: params,
+        },
+        wires,
+        elements,
+      );
+      if (result.element === null) return { mutation: null, error: result.error };
+      return { mutation: { type: 'add_gate', element: result.element }, error: null };
     }
 
     default:
-      return { mutation: null, error: `Unknown tool: "${name}"` };
+      return { mutation: null, error: `Unknown tool "${name}". Available: ${AI_TOOLS.map(t => t.name).join(', ')}` };
   }
 }
