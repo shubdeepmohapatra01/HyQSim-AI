@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import GatePalette from './components/GatePalette';
 import CircuitCanvas from './components/CircuitCanvas';
 import DisplayPanel from './components/DisplayPanel';
@@ -6,6 +6,8 @@ import GateParameterEditor from './components/GateParameterEditor';
 import ImportExportModal from './components/ImportExportModal';
 import BenchmarkMenu from './components/BenchmarkMenu';
 import ChatPanel from './components/ChatPanel';
+import McpSessionBadge from './components/McpSessionBadge';
+import { CanvasSession, type SessionStatus } from './mcp/session';
 // import RabiPlot from './components/RabiPlot';
 import { BENCHMARKS, recomputeCatCDParams } from './benchmarks/circuits';
 // import { runJCSweep } from './benchmarks/sweep';
@@ -50,6 +52,7 @@ function App() {
 
   // Number of measurement shots for bitstring histogram
   const [shots, setShots] = useState(1024);
+  const [canvasVersion, setCanvasVersion] = useState(0);
 
   // Import/Export modal
   const [qiskitIOMode, setQiskitIOMode] = useState<'import' | 'export' | null>(null);
@@ -129,14 +132,16 @@ function App() {
   }, []);
 
   const handleDropGate = useCallback(
-    (gate: Gate & { generatorExpression?: string }, wireIndex: number, position: { x: number; y: number }, targetWireIndices?: number[]) => {
+    (gate: Gate & { generatorExpression?: string }, wireIndex: number, position: { x: number; y: number }, targetWireIndices?: number[], parameterValues?: Record<string, number>) => {
       const newElement: CircuitElement = {
-        id: `element-${Date.now()}`,
+        // Random suffix matters: batch placement (benchmarks, AI build_circuit) can add
+        // several gates inside the same millisecond, and duplicate ids break removal.
+        id: `element-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         gateId: gate.id.startsWith('custom-saved-') ? (targetWireIndices?.length ? 'custom_cvdv' : 'custom_cv') : gate.id,
         position,
         wireIndex,
         targetWireIndices,
-        parameterValues: getDefaultParameters(gate),
+        parameterValues: parameterValues ?? getDefaultParameters(gate),
         // Preserve generator expression from saved custom gates
         generatorExpression: gate.generatorExpression,
       };
@@ -146,6 +151,16 @@ function App() {
     },
     []
   );
+
+  /**
+   * Appends a fully-formed element. Used by the AI assistant, which has already validated
+   * and positioned the gate via `ai/hqc.placeGate` and needs the element it constructed to
+   * land on the canvas unchanged.
+   */
+  const handleAddElement = useCallback((element: CircuitElement) => {
+    setElements((prev) => [...prev, element]);
+    setSimulationResult(null);
+  }, []);
 
   const handleDragStart = useCallback(() => {
     // Could track dragged gate if needed
@@ -225,24 +240,39 @@ function App() {
     });
   }, []);
 
-  const handleRunSimulation = useCallback(async () => {
+  /**
+   * Runs the simulation and returns the result.
+   *
+   * `override` exists for the AI assistant: when it builds a circuit and runs it in the
+   * same agent turn, React state has not committed yet, so the closure here still sees the
+   * previous circuit. The assistant passes the circuit it just built explicitly.
+   *
+   * Returning the result (rather than only setting state) lets the assistant read the
+   * numbers immediately, for the same reason. The Run button ignores the return value.
+   */
+  const handleRunSimulation = useCallback(async (
+    override?: { wires: Wire[]; elements: CircuitElement[] },
+  ): Promise<SimulationResult | null> => {
+    const runWires = override?.wires ?? wires;
+    const runElements = override?.elements ?? elements;
+
     setIsSimulating(true);
 
     // Collect wire indices that have a Measure gate placed on them
-    const measuredWireIndices = elements
+    const measuredWireIndices = runElements
       .filter(e => e.gateId === 'measure')
       .map(e => e.wireIndex);
 
     try {
       if (backend === 'python' && backendAvailable) {
         // Strip measure gates — the Python backend doesn't know about them
-        const nonMeasureElements = elements.filter(e => e.gateId !== 'measure');
-        const rawResult = await runBackendSimulation(wires, nonMeasureElements, fockTruncation, postSelections, shots);
+        const nonMeasureElements = runElements.filter(e => e.gateId !== 'measure');
+        const rawResult = await runBackendSimulation(runWires, nonMeasureElements, fockTruncation, postSelections, shots);
 
         // Marginalize bitstrings to only the measured qubits
         let bitstringCounts = rawResult.bitstringCounts;
         if (measuredWireIndices.length > 0 && bitstringCounts) {
-          const positions = getQubitBitstringPositions(wires, measuredWireIndices);
+          const positions = getQubitBitstringPositions(runWires, measuredWireIndices);
           bitstringCounts = positions.length > 0
             ? marginalizeCountsToPositions(bitstringCounts, positions)
             : undefined;
@@ -250,30 +280,34 @@ function App() {
           bitstringCounts = undefined;
         }
 
-        setSimulationResult({ ...rawResult, bitstringCounts });
-      } else {
-        // Use browser-based simulation
-        // Use setTimeout to allow UI to update before heavy computation
-        await new Promise<void>((resolve) => {
-          setTimeout(() => {
-            try {
-              const result = runSimulation(wires, elements, gatesMap, fockTruncation, postSelections, shots, measuredWireIndices);
-              setSimulationResult(result);
-            } catch (error) {
-              console.error('Simulation error:', error);
-              alert('Simulation error. Check console for details.');
-            }
-            resolve();
-          }, 10);
-        });
+        const finalResult = { ...rawResult, bitstringCounts };
+        setSimulationResult(finalResult);
+        return finalResult;
       }
+
+      // Use browser-based simulation.
+      // setTimeout lets the UI paint before the heavy computation blocks the main thread.
+      return await new Promise<SimulationResult | null>((resolve) => {
+        setTimeout(() => {
+          try {
+            const result = runSimulation(runWires, runElements, gatesMap, fockTruncation, postSelections, shots, measuredWireIndices);
+            setSimulationResult(result);
+            resolve(result);
+          } catch (error) {
+            console.error('Simulation error:', error);
+            alert('Simulation error. Check console for details.');
+            resolve(null);
+          }
+        }, 10);
+      });
     } catch (error) {
       console.error('Simulation error:', error);
       alert(`Simulation error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return null;
     } finally {
       setIsSimulating(false);
     }
-  }, [wires, elements, gatesMap, fockTruncation, backend, backendAvailable, postSelections]);
+  }, [wires, elements, gatesMap, fockTruncation, backend, backendAvailable, postSelections, shots]);
 
   const handleImportCircuit = useCallback((newWires: Wire[], newElements: CircuitElement[]) => {
     setWires(newWires);
@@ -293,8 +327,82 @@ function App() {
     setQumodeCount(0);
     setSimulationResult(null);
     setPostSelections([]);
-    // setActiveJCParams(null);
-    // setJcSweepData(null);
+    setCanvasVersion(v => v + 1); // signals ChatPanel to reset conversation history
+  }, []);
+
+  // ─── MCP bridge ─────────────────────────────────────────────────────────────
+  // Lets an external AI client (Claude Desktop / Claude Code) drive this canvas over the
+  // user's own subscription rather than an API key. Opt-in, and off by default: opening a
+  // socket that lets another process rewrite the canvas should be a deliberate choice.
+  //
+  // Simulation stays here. When the MCP server asks for results we run HyQSim's simulator
+  // locally with the user's selected backend, then send back what it produced.
+
+  const [mcpEnabled, setMcpEnabled] = useState(() => {
+    try { return localStorage.getItem('hyqsim-mcp-enabled') === 'true'; } catch { return false; }
+  });
+  const [mcpStatus, setMcpStatus] = useState<SessionStatus>('disabled');
+  const [mcpCode, setMcpCode] = useState<string | null>(null);
+  const [mcpError, setMcpError] = useState<string | undefined>();
+  const sessionRef = useRef<CanvasSession | null>(null);
+
+  // Latest values for the session callbacks, which outlive any single render.
+  const runSimulationRef = useRef(handleRunSimulation);
+  useEffect(() => { runSimulationRef.current = handleRunSimulation; }, [handleRunSimulation]);
+  const importCircuitRef = useRef(handleImportCircuit);
+  useEffect(() => { importCircuitRef.current = handleImportCircuit; }, [handleImportCircuit]);
+
+  useEffect(() => {
+    if (!mcpEnabled) {
+      sessionRef.current?.disconnect();
+      sessionRef.current = null;
+      setMcpStatus('disabled');
+      setMcpCode(null);
+      setMcpError(undefined);
+      return;
+    }
+
+    const session = new CanvasSession({
+      onCircuit: (newWires, newElements) => importCircuitRef.current(newWires, newElements),
+      onRunSimulation: () => runSimulationRef.current({
+        wires: sessionWiresRef.current,
+        elements: sessionElementsRef.current,
+      }),
+      onStatusChange: (status, code, error) => {
+        setMcpStatus(status);
+        setMcpCode(code);
+        setMcpError(error);
+      },
+    });
+    sessionRef.current = session;
+    session.connect();
+
+    return () => {
+      session.disconnect();
+      sessionRef.current = null;
+    };
+  }, [mcpEnabled]);
+
+  // The simulation request arrives asynchronously, so the callback above needs the
+  // circuit as of right now rather than as of the render that created the session.
+  const sessionWiresRef = useRef(wires);
+  const sessionElementsRef = useRef(elements);
+  useEffect(() => { sessionWiresRef.current = wires; }, [wires]);
+  useEffect(() => { sessionElementsRef.current = elements; }, [elements]);
+
+  // Mirror local canvas edits up so an AI client sees what the user is doing.
+  useEffect(() => {
+    sessionRef.current?.pushCircuit(wires, elements, fockTruncation, backend);
+  }, [wires, elements, fockTruncation, backend]);
+
+  // Share results the user produced with the Run button, so the AI need not re-run.
+  useEffect(() => {
+    if (simulationResult) sessionRef.current?.pushResult(simulationResult);
+  }, [simulationResult]);
+
+  const toggleMcp = useCallback((next: boolean) => {
+    setMcpEnabled(next);
+    try { localStorage.setItem('hyqsim-mcp-enabled', String(next)); } catch { /* ignore */ }
   }, []);
 
   const handleLoadBenchmark = useCallback((benchmarkId: string, mode: 'new' | 'append' | 'append-new-qubits', params?: Record<string, number>) => {
@@ -465,6 +573,15 @@ function App() {
               </div>
             </div>
 
+            {/* MCP bridge — drive this canvas from Claude Desktop / Claude Code */}
+            <McpSessionBadge
+              enabled={mcpEnabled}
+              status={mcpStatus}
+              code={mcpCode}
+              error={mcpError}
+              onToggle={toggleMcp}
+            />
+
             {/* Benchmarks + Import/Export */}
             <div className="flex items-center gap-1">
               <BenchmarkMenu onLoadBenchmark={handleLoadBenchmark} hasExistingCircuit={wires.length > 0} hasExistingQubits={wires.some(w => w.type === 'qubit')} />
@@ -536,9 +653,16 @@ function App() {
               wires={wires}
               elements={elements}
               onAddWire={handleAddWire}
-              onDropGate={handleDropGate}
+              onAddElement={handleAddElement}
+              onApplyCircuit={handleImportCircuit}
               onRemoveElement={handleRemoveElement}
               onClearCanvas={handleClearCanvas}
+              onRunSimulation={handleRunSimulation}
+              onFockTruncationChange={setFockTruncation}
+              canvasVersion={canvasVersion}
+              simulationResult={simulationResult}
+              fockTruncation={fockTruncation}
+              backend={backend}
             />
           </main>
 

@@ -26,7 +26,7 @@ interface CircuitCanvasProps {
   wires: Wire[];
   elements: CircuitElement[];
   onAddWire: (type: 'qubit' | 'qumode') => void;
-  onDropGate: (gate: Gate, wireIndex: number, position: { x: number; y: number }, targetWireIndices?: number[]) => void;
+  onDropGate: (gate: Gate, wireIndex: number, position: { x: number; y: number }, targetWireIndices?: number[], parameterValues?: Record<string, number>) => void;
   onRemoveWire: (wireId: string) => void;
   onRemoveElement: (elementId: string) => void;
   onElementClick: (element: CircuitElement) => void;

@@ -24,6 +24,8 @@ interface BackendHealthResponse {
   };
 }
 
+export { BACKEND_URL };
+
 /**
  * Check if the backend is available and healthy.
  */
@@ -48,6 +50,20 @@ export async function checkBackendHealth(): Promise<{
     };
   } catch {
     return { available: false, bosonicAvailable: false };
+  }
+}
+
+/**
+ * Check which AI providers have server-side keys configured.
+ * Returns e.g. { anthropic: true, openai: false, groq: true, ... }
+ */
+export async function checkServerAIProviders(): Promise<Record<string, boolean>> {
+  try {
+    const response = await fetch(`${BACKEND_URL}/ai/providers`);
+    if (!response.ok) return {};
+    return await response.json() as Record<string, boolean>;
+  } catch {
+    return {};
   }
 }
 
