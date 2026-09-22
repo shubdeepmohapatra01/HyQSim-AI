@@ -1,0 +1,38 @@
+from Calibration_PulseDefinitions.QubitBosonPulses usepulses *
+
+register q[3]
+
+subcircuit {
+    Rz q[2] 4.0297
+    Ry q[2] 2.4589
+    Rz q[2] 1.5708
+    xCD q[2] 1 2 0.98841 0.27302
+    Rz q[2] 0.66168
+    Ry q[2] 0.55818
+    Rz q[2] 10.086
+    Rz q[2] 12.160
+    Ry q[2] 0.94377
+    Rz q[2] 9.0182
+    xCD q[2] 1 2 -0.35932 0.034818
+    Rz q[2] 0.57344
+    Ry q[2] 0.096769
+    Rz q[2] 9.9982
+    Rz q[2] 0.012336
+    Ry q[2] 0.38108
+    Rz q[2] 9.4371
+    xCD q[2] 1 2 0.27375 -0.48410
+    Rz q[2] 12.346
+    Ry q[2] 0.24213
+    Rz q[2] 9.2042
+    Rz q[2] 8.8961
+    Ry q[2] 0.010697
+    Rz q[2] 12.038
+    xCD q[2] 1 2 0.27059 0.12848
+    Rz q[2] 0.23576
+    Ry q[2] 1.5131
+    Rz q[2] 9.6605
+    Rz q[2] 6.2832
+    Ry q[2] 1.5708
+    AJC q[1] 1 2 0.0 0.02
+    AJC q[0] 0 2 0.0 0.02
+}
