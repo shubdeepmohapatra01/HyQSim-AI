@@ -17,6 +17,30 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Vite 7 needs ^20.19 || >=22.12 and vitest needs >=22.12, so 22.12 is the
+# real floor for both the dev server and the test suite.
+MIN_NODE_MAJOR=22
+
+# Detect Windows (Git Bash / MSYS2 / Cygwin), where a venv puts its
+# activate script in Scripts/ rather than bin/.
+is_windows() {
+    case "$OSTYPE" in
+        msys*|cygwin*|win32*) return 0 ;;
+    esac
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|CYGWIN*|MSYS*) return 0 ;;
+    esac
+    return 1
+}
+
+activate_venv() {
+    if is_windows; then
+        source "venv/Scripts/activate"
+    else
+        source "venv/bin/activate"
+    fi
+}
+
 # Check for required tools
 check_requirements() {
     echo "Checking requirements..."
@@ -24,15 +48,17 @@ check_requirements() {
     # Check Node.js
     if ! command -v node &> /dev/null; then
         echo -e "${RED}Error: Node.js is not installed${NC}"
-        echo "Please install Node.js 18+ from https://nodejs.org/"
+        echo "Please install Node.js $MIN_NODE_MAJOR+ from https://nodejs.org/"
         exit 1
     fi
     NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
-    if [ "$NODE_VERSION" -lt 18 ]; then
-        echo -e "${YELLOW}Warning: Node.js version 18+ recommended (found v$NODE_VERSION)${NC}"
-    else
-        echo -e "${GREEN}✓ Node.js $(node -v)${NC}"
+    if [ "$NODE_VERSION" -lt "$MIN_NODE_MAJOR" ]; then
+        echo -e "${RED}Error: Node.js $MIN_NODE_MAJOR+ is required (found $(node -v))${NC}"
+        echo "Vite 7 and vitest refuse to run on older releases."
+        echo "Install a current LTS from https://nodejs.org/ and re-run this script."
+        exit 1
     fi
+    echo -e "${GREEN}✓ Node.js $(node -v)${NC}"
 
     # Check npm
     if ! command -v npm &> /dev/null; then
@@ -94,7 +120,7 @@ install_backend() {
     fi
 
     # Activate virtual environment
-    source venv/bin/activate
+    activate_venv
 
     # Upgrade pip
     pip install --upgrade pip
@@ -127,7 +153,7 @@ install_bosonic_qiskit() {
 
     # Install in editable mode
     cd "$PROJECT_DIR/backend"
-    source venv/bin/activate
+    activate_venv
     echo "Installing bosonic-qiskit in editable mode..."
     pip install -e ../bosonic-qiskit
 
@@ -151,7 +177,7 @@ verify_installation() {
 
     # Check backend
     cd "$PROJECT_DIR/backend"
-    source venv/bin/activate
+    activate_venv
 
     # Check bosonic-qiskit
     if python -c "from bosonic_qiskit import CVCircuit; print('bosonic-qiskit OK')" 2>/dev/null; then
