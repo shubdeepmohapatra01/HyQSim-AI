@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:watch": "vitest",
     "ai:replay": "vitest run src/ai/evals/replay.test.ts",
     "ai:budget": "tsx src/ai/evals/budget.ts",
     "ai:live": "tsx src/ai/evals/live.ts",
