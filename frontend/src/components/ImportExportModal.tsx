@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback } from 'react';
 import type { Wire, CircuitElement } from '../types/circuit';
 import { parseBosonicQiskit, generateBosonicQiskit } from '../simulation/qiskitIO';
 import { parseHybridLane, generateHybridLane } from '../simulation/hybridlaneIO';
+import { parseJaqal, generateJaqal } from '../simulation/jaqalIO';
 
-type CodeFormat = 'bosonic-qiskit' | 'hybridlane';
+type CodeFormat = 'bosonic-qiskit' | 'hybridlane' | 'jaqal';
 
 interface ImportExportModalProps {
   mode: 'import' | 'export';
@@ -17,21 +18,46 @@ interface ImportExportModalProps {
 const FORMAT_LABELS: Record<CodeFormat, string> = {
   'bosonic-qiskit': 'Bosonic Qiskit (c2qa)',
   'hybridlane': 'HybridLane (PennyLane)',
+  'jaqal': 'Jaqal (QSCOUT ion trap)',
+};
+
+/**
+ * One accent colour per format, so the three options read as three separate
+ * chips rather than running together into a single line of text. Written out in
+ * full because Tailwind scans for complete class names — an interpolated
+ * `bg-${colour}-600` would never make it into the stylesheet.
+ */
+const FORMAT_STYLES: Record<CodeFormat, { selected: string; idle: string }> = {
+  'bosonic-qiskit': {
+    selected: 'bg-blue-600 border-blue-300 text-white shadow-md shadow-blue-900/50',
+    idle: 'bg-slate-950 border-blue-500/70 text-blue-300 hover:bg-blue-600/25 hover:border-blue-400',
+  },
+  'hybridlane': {
+    selected: 'bg-emerald-600 border-emerald-300 text-white shadow-md shadow-emerald-900/50',
+    idle: 'bg-slate-950 border-emerald-500/70 text-emerald-300 hover:bg-emerald-600/25 hover:border-emerald-400',
+  },
+  'jaqal': {
+    selected: 'bg-amber-500 border-amber-200 text-slate-950 shadow-md shadow-amber-900/50',
+    idle: 'bg-slate-950 border-amber-500/70 text-amber-300 hover:bg-amber-500/25 hover:border-amber-400',
+  },
 };
 
 const IMPORT_DESCRIPTIONS: Record<CodeFormat, string> = {
   'bosonic-qiskit': 'Paste bosonic qiskit (c2qa) code below. Register declarations are required, but import lines are optional.',
   'hybridlane': 'Paste HybridLane gate calls (qml.* / hqml.*) below. Import lines, decorators, and boilerplate are optional. Loops and conditionals are not supported.',
+  'jaqal': 'Paste a Jaqal program from hybridlane\'s QSCOUT device. Qubits come from the register; qumodes are addressed by (manifold, mode) and become qumode wires in order of first appearance. Any gate without an exact HyQSim equivalent stops the import.',
 };
 
 const EXPORT_DESCRIPTIONS: Record<CodeFormat, string> = {
   'bosonic-qiskit': 'Generated bosonic qiskit (c2qa) Python code for your circuit.',
   'hybridlane': 'Generated HybridLane (PennyLane) Python code for your circuit.',
+  'jaqal': 'Generated Jaqal program for the QSCOUT ion trap. Only gates native to the trap can be exported.',
 };
 
 const IMPORT_PLACEHOLDERS: Record<CodeFormat, string> = {
   'bosonic-qiskit': `qmr = c2qa.QumodeRegister(num_qumodes=1, num_qubits_per_qumode=4)\nqbr = qiskit.QuantumRegister(1)\ncircuit = c2qa.CVCircuit(qmr, qbr)\n\ncircuit.h(qbr[0])\ncircuit.cv_d(1.0, qmr[0])\ncircuit.cv_c_d(complex(1, 0.5), qmr[0], qbr[0])`,
   'hybridlane': `qml.Hadamard(wires=0)\nhqml.Displacement(1.0, 0, wires="m0")\nhqml.ConditionalDisplacement(1.0, 0.5, wires=[0, "m0"])`,
+  'jaqal': `from Calibration_PulseDefinitions.QubitBosonPulses usepulses *\n\nregister q[3]\n\nsubcircuit {\n    Rz q[2] 4.0297\n    Ry q[2] 2.4589\n    xCD q[2] 1 2 0.98841 0.27302\n    AJC q[1] 1 2 0.0 0.02\n}`,
 };
 
 export default function ImportExportModal({
@@ -56,7 +82,9 @@ export default function ImportExportModal({
     try {
       const result = format === 'bosonic-qiskit'
         ? generateBosonicQiskit(wires, elements, fockTruncation)
-        : generateHybridLane(wires, elements, fockTruncation);
+        : format === 'jaqal'
+          ? generateJaqal(wires, elements)
+          : generateHybridLane(wires, elements, fockTruncation);
       if (result.success) {
         setExportedCode(result.code);
       } else {
@@ -85,7 +113,9 @@ export default function ImportExportModal({
     try {
       const result = format === 'bosonic-qiskit'
         ? parseBosonicQiskit(code)
-        : parseHybridLane(code);
+        : format === 'jaqal'
+          ? parseJaqal(code)
+          : parseHybridLane(code);
       if (result.success) {
         setImportResult({ wires: result.wires, elements: result.elements });
         setWarnings(result.warnings || []);
@@ -144,23 +174,25 @@ export default function ImportExportModal({
       >
         {/* Header with tabs */}
         <div className="flex items-center justify-between border-b border-slate-700 px-4 pt-4 pb-0">
-          <div className="flex gap-1">
+          <div className="flex gap-3">
             <button
               onClick={() => handleTabSwitch('import')}
-              className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+              aria-pressed={activeTab === 'import'}
+              className={`px-5 py-2 text-sm font-semibold rounded-t-lg transition-colors border-b-4 ${
                 activeTab === 'import'
-                  ? 'bg-slate-900 text-white border-b-2 border-blue-500'
-                  : 'text-slate-400 hover:text-white'
+                  ? 'bg-slate-900 text-white border-blue-400'
+                  : 'text-slate-400 border-transparent hover:text-white hover:bg-slate-700/50'
               }`}
             >
               Import
             </button>
             <button
               onClick={() => handleTabSwitch('export')}
-              className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+              aria-pressed={activeTab === 'export'}
+              className={`px-5 py-2 text-sm font-semibold rounded-t-lg transition-colors border-b-4 ${
                 activeTab === 'export'
-                  ? 'bg-slate-900 text-white border-b-2 border-purple-500'
-                  : 'text-slate-400 hover:text-white'
+                  ? 'bg-slate-900 text-white border-purple-400'
+                  : 'text-slate-400 border-transparent hover:text-white hover:bg-slate-700/50'
               }`}
             >
               Export
@@ -174,18 +206,19 @@ export default function ImportExportModal({
           </button>
         </div>
 
-        {/* Format selector */}
-        <div className="px-4 pt-3 pb-1 flex items-center gap-2">
-          <span className="text-xs text-slate-500">Format:</span>
-          <div className="flex bg-slate-900 rounded-lg p-0.5">
-            {(['bosonic-qiskit', 'hybridlane'] as CodeFormat[]).map((f) => (
+        {/* Format selector — shared by the Import and Export tabs */}
+        <div className="px-4 pt-3 pb-2 flex items-center gap-3 flex-wrap">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+            Format
+          </span>
+          <div className="inline-flex items-stretch gap-2">
+            {(['bosonic-qiskit', 'hybridlane', 'jaqal'] as CodeFormat[]).map((f) => (
               <button
                 key={f}
                 onClick={() => handleFormatSwitch(f)}
-                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-                  format === f
-                    ? 'bg-slate-700 text-white'
-                    : 'text-slate-400 hover:text-slate-300'
+                aria-pressed={format === f}
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg border-2 transition-colors whitespace-nowrap ${
+                  format === f ? FORMAT_STYLES[f].selected : FORMAT_STYLES[f].idle
                 }`}
               >
                 {FORMAT_LABELS[f]}

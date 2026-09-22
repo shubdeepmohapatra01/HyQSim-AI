@@ -49,6 +49,13 @@ export interface Wire {
   type: 'qubit' | 'qumode';
   index: number;
   initialState?: QubitInitialState | QumodeInitialState;
+  /**
+   * Hardware address of a qumode on the Sandia QSCOUT ion trap, as used by the
+   * Jaqal format: modes are addressed by (manifold, index) rather than by a
+   * register slot. Set when a circuit is imported from Jaqal so that exporting
+   * reproduces the original addressing.
+   */
+  jaqalMode?: { manifold: number; index: number };
 }
 
 export interface CircuitState {
