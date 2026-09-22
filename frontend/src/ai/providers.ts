@@ -46,9 +46,39 @@ export const MODEL_OPTIONS: ModelOption[] = [
   // at the cost of the model changing under you between runs — pin a version above when
   // you need an eval to be reproducible.
   { id: 'gemini-flash-latest',       label: 'Gemini Flash (latest, auto-updates)', baseUrl: GEMINI_BASE,                                                 apiFormat: 'openai',    maxTokens: 2048 },
-  // Groq — free tier but tight TPM limits; keep maxTokens low to avoid rate errors
-  { id: 'llama-3.3-70b-versatile',   label: 'Llama 3.3 70B (Groq)',          baseUrl: GROQ_BASE,                                                         apiFormat: 'openai',    maxTokens: 1024 },
-  { id: 'llama-3.1-8b-instant',      label: 'Llama 3.1 8B (Groq) ⚠ low TPM', baseUrl: GROQ_BASE,                                                       apiFormat: 'openai',    maxTokens: 512  },
+  // Groq — free tier, no credit card, but tight TPM limits; keep maxTokens low to avoid
+  // rate errors.
+  //
+  // The whole Llama line is gone: Groq deprecated llama-3.3-70b-versatile and
+  // llama-3.1-8b-instant on 2026-06-17 and shut them off on 2026-08-16 for the free and
+  // developer tiers. Groq's own migration targets are the ids below. gpt-oss-120b is the
+  // replacement for 70b-versatile and is the strongest free tool-caller here; qwen3.6-27b
+  // is the only Groq model that still does *parallel* tool calls, at the cost of being a
+  // preview model (evaluation only — Groq can pull it without notice).
+  //
+  // Confirmed against console.groq.com/docs/models and /docs/tool-use on 2026-08-19.
+  // Re-run `GROQ_API_KEY=... npm run ai:models` rather than guessing if one stops working.
+  //
+  // On maxTokens and rate limits — measured against a live free-tier key on 2026-08-19:
+  //
+  //   Groq reserves the *requested* max_tokens against the per-minute budget when the
+  //   request arrives, not the tokens actually generated. A max_tokens:2048 request that
+  //   returned 130 tokens still drew 2110 off an 8000 TPM budget. So one agent turn (tool
+  //   call → simulation → answer, each resending history at ~2.5k input) charges ~13.7k
+  //   against 8k/min and rate-limits itself partway through.
+  //
+  // Halving this to 1024 is the obvious fix and it was tried. Do not repeat it without
+  // evidence: gpt-oss spends max_tokens on reasoning before it answers, and at 1024 both
+  // optimize-ghz-5 and optimize-merge-rotations — which pass at 2048 — produced worse
+  // rewrites (depth 5 instead of 4; two rz gates left unmerged). Cheaper requests, wrong
+  // circuits. The rate limit is handled by backing off in client.ts instead, which costs
+  // waiting rather than correctness.
+  //
+  // The real lever, if 429s become intolerable, is the ~2.5k input each request carries,
+  // not the output cap.
+  { id: 'openai/gpt-oss-120b',       label: 'GPT-OSS 120B (Groq, free)',      baseUrl: GROQ_BASE,                                                       apiFormat: 'openai',    maxTokens: 2048 },
+  { id: 'openai/gpt-oss-20b',        label: 'GPT-OSS 20B (Groq, free)',       baseUrl: GROQ_BASE,                                                       apiFormat: 'openai',    maxTokens: 1024 },
+  { id: 'qwen/qwen3.6-27b',          label: 'Qwen3.6 27B (Groq, free) ⚠ preview', baseUrl: GROQ_BASE,                                                  apiFormat: 'openai',    maxTokens: 2048 },
   // Together
   { id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', label: 'Llama 3.3 70B (Together)', baseUrl: 'https://api.together.xyz/v1',                           apiFormat: 'openai',    maxTokens: 2048 },
   // Mistral
@@ -56,6 +86,36 @@ export const MODEL_OPTIONS: ModelOption[] = [
 ];
 
 export const DEFAULT_MODEL = MODEL_OPTIONS[0]; // Claude Sonnet 4.6
+
+/** The best free-tier option: no credit card, and the strongest tool-caller among them. */
+export const DEFAULT_FREE_MODEL = MODEL_OPTIONS.find(m => m.id === 'openai/gpt-oss-120b')!;
+
+/**
+ * Ids that have been dropped from the registry, mapped to what replaces them.
+ *
+ * The selected model is persisted in localStorage, so a returning user still carries the
+ * retired id. Without this they land on a model that is not in MODEL_OPTIONS: the select
+ * renders blank, the base URL silently falls back to whatever DEFAULT_MODEL uses, and the
+ * request 404s against the wrong host. Rewriting on read is the cheap fix.
+ */
+export const RETIRED_MODELS: Record<string, string> = {
+  // Groq shut the Llama line off for free/developer tiers on 2026-08-16. These are Groq's
+  // own recommended migration targets.
+  'llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
+  'llama-3.1-8b-instant': 'openai/gpt-oss-20b',
+};
+
+/** Rewrites a retired model id to its replacement; passes anything else through. */
+export function resolveModelId(modelId: string): string {
+  return RETIRED_MODELS[modelId] ?? modelId;
+}
+
+/**
+ * Groq serves models under vendor-prefixed ids (`openai/gpt-oss-120b`, `qwen/qwen3.6-27b`),
+ * which look like other providers' names. Match these before the bare-prefix rules below —
+ * `openai/gpt-oss-120b` is a Groq model and must not route to OpenAI.
+ */
+const GROQ_PREFIXES = ['openai/', 'qwen/', 'groq/', 'moonshotai/', 'minimaxai/'];
 
 /**
  * Maps a model id to the backend provider that holds a key for it.
@@ -67,12 +127,12 @@ export const DEFAULT_MODEL = MODEL_OPTIONS[0]; // Claude Sonnet 4.6
  */
 export function providerForModel(modelId: string): string | null {
   if (!modelId || modelId === 'custom') return null;
+  if (modelId.startsWith('meta-llama/') || modelId.includes('Turbo')) return 'together';
+  if (GROQ_PREFIXES.some(p => modelId.startsWith(p))) return 'groq';
   if (modelId.startsWith('claude-')) return 'anthropic';
   if (modelId.startsWith('gpt-') || modelId.startsWith('o1-') || modelId.startsWith('o3-')) return 'openai';
-  if (modelId.startsWith('llama-') || modelId.startsWith('mixtral-') || modelId.startsWith('gemma-')) return 'groq';
   if (modelId.startsWith('gemini-')) return 'google';
   if (modelId.startsWith('mistral-') || modelId.startsWith('codestral-')) return 'mistral';
-  if (modelId.startsWith('meta-llama/') || modelId.includes('Turbo')) return 'together';
   return null;
 }
 

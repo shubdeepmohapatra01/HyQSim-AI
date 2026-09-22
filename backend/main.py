@@ -53,7 +53,10 @@ _AI_PROVIDERS = {
     'groq': {
         'key': os.getenv('GROQ_API_KEY'),
         'url': 'https://api.groq.com/openai/v1/chat/completions',
-        'models': ['llama-', 'mixtral-', 'gemma-'],
+        # Groq serves vendor-prefixed ids ('openai/gpt-oss-120b', 'qwen/qwen3.6-27b').
+        # The Llama line was shut off for free/developer tiers on 2026-08-16.
+        # Must stay in sync with GROQ_PREFIXES in frontend/src/ai/providers.ts.
+        'models': ['openai/', 'qwen/', 'groq/', 'moonshotai/', 'minimaxai/'],
         'headers': lambda key: {
             'Authorization': f'Bearer {key}',
             'content-type': 'application/json',

@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { Wire, CircuitElement, SimulationResult } from '../types/circuit';
 import { runAgentTurn, type HistoryEntry, type StreamEvent } from '../ai/client';
-import { MODEL_OPTIONS, DEFAULT_MODEL, SERVER_PROXY_URL, providerForModel, type ModelOption } from '../ai/providers';
-import { parseToolCall, MUTATING_TOOLS } from '../ai/tools';
+import { MODEL_OPTIONS, DEFAULT_MODEL, SERVER_PROXY_URL, providerForModel, resolveModelId, type ModelOption } from '../ai/providers';
+import { parseToolCall, MUTATING_TOOLS, MUTATING_INTENTS } from '../ai/tools';
 import { circuitToPrompt, simulationResultToPrompt } from '../ai/circuitToPrompt';
 import { unsupportedOnPythonBackend } from '../ai/hqc';
 import { classifyIntent, shouldForceTools, shouldAutoRunSimulation, type Intent } from '../ai/intent';
@@ -30,12 +30,17 @@ const MAX_HISTORY_ENTRIES = 12;
 
 const SNAPSHOT_RE = /^\[Canvas:[\s\S]*?\]\n\[Simulation:[\s\S]*?\]\n\n/;
 
+/** Tools that overwrite the whole canvas, so the turn that used one is worth offering a revert on. */
+const REPLACING_TOOLS = new Set(['build_circuit', 'load_benchmark', 'clear_circuit']);
+
 type DisplayMessage = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   actions: string[];
   isStreaming: boolean;
+  /** This turn replaced the circuit wholesale — show the revert affordance. */
+  replacedCanvas?: boolean;
 };
 
 interface ChatPanelProps {
@@ -51,6 +56,9 @@ interface ChatPanelProps {
   ) => Promise<SimulationResult | null>;
   /** Benchmarks carry their own Fock truncation (the cat state needs 32). */
   onFockTruncationChange: (fock: number) => void;
+  /** Restores the circuit as it was before the last wholesale replacement. */
+  onRevertCircuit: () => { wires: Wire[]; elements: CircuitElement[] } | null;
+  canRevert: boolean;
   /** Incremented whenever the canvas is cleared — triggers conversation history reset */
   canvasVersion: number;
   simulationResult: SimulationResult | null;
@@ -91,7 +99,8 @@ function pruneHistory(history: HistoryEntry[]): HistoryEntry[] {
 
 export default function ChatPanel({
   wires, elements, onAddWire, onAddElement, onApplyCircuit, onRemoveElement, onClearCanvas,
-  onRunSimulation, onFockTruncationChange, canvasVersion, simulationResult, fockTruncation, backend,
+  onRunSimulation, onFockTruncationChange, onRevertCircuit, canRevert,
+  canvasVersion, simulationResult, fockTruncation, backend,
 }: ChatPanelProps) {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -100,13 +109,15 @@ export default function ChatPanel({
   const [useServerKey, setUseServerKey] = useState(() => ls('hyqsim-ai-server-key', 'false') === 'true');
 
   const [apiKey, setApiKey] = useState(() => ls('hyqsim-ai-key', ''));
-  const [modelId, setModelId] = useState(() => ls('hyqsim-ai-model', DEFAULT_MODEL.id));
+  // resolveModelId rewrites ids the provider has retired — a returning user's localStorage
+  // still holds e.g. llama-3.3-70b-versatile, which no longer exists on Groq.
+  const [modelId, setModelId] = useState(() => resolveModelId(ls('hyqsim-ai-model', DEFAULT_MODEL.id)));
   const [baseUrl, setBaseUrl] = useState(() => {
-    const savedModel = ls('hyqsim-ai-model', DEFAULT_MODEL.id);
+    const savedModel = resolveModelId(ls('hyqsim-ai-model', DEFAULT_MODEL.id));
     return MODEL_OPTIONS.find(m => m.id === savedModel)?.baseUrl ?? DEFAULT_MODEL.baseUrl;
   });
   const [apiFormat, setApiFormat] = useState<'openai' | 'anthropic'>(() => {
-    const savedModel = ls('hyqsim-ai-model', DEFAULT_MODEL.id);
+    const savedModel = resolveModelId(ls('hyqsim-ai-model', DEFAULT_MODEL.id));
     return (MODEL_OPTIONS.find(m => m.id === savedModel) as ModelOption | undefined)?.apiFormat ?? DEFAULT_MODEL.apiFormat;
   });
   const [customModelId, setCustomModelId] = useState('');
@@ -233,13 +244,16 @@ export default function ChatPanel({
     return simulationResultToPrompt(result, w, fockTruncationRef.current);
   }, [onRunSimulation]);
 
+  /** Optimize turns get the per-wire view of the circuit in every result they read. */
+  const optimizing = () => currentIntent.current === 'optimize';
+
   const handleToolCall = useCallback(async (
     name: string, toolInput: Record<string, unknown>,
   ): Promise<string> => {
     // Guard rail for the failure mode users complained about most: asking for an
     // explanation and having the assistant quietly rebuild the canvas.
-    if (MUTATING_TOOLS.has(name) && currentIntent.current !== 'build') {
-      return `Refused: this is a ${currentIntent.current} request, not a build request. Answer from the [Canvas: ...] and [Simulation: ...] snapshots instead of modifying the circuit.`;
+    if (MUTATING_TOOLS.has(name) && !MUTATING_INTENTS.has(currentIntent.current)) {
+      return `Refused: this is a ${currentIntent.current} request, not a build or optimize request. Answer from the [Canvas: ...] and [Simulation: ...] snapshots instead of modifying the circuit.`;
     }
 
     const result = parseToolCall(name, toolInput, workingWires.current, workingElements.current);
@@ -248,7 +262,7 @@ export default function ChatPanel({
 
     switch (mutation.type) {
       case 'read_circuit':
-        return circuitToPrompt(workingWires.current, workingElements.current);
+        return circuitToPrompt(workingWires.current, workingElements.current, optimizing());
 
       case 'run_simulation':
         return runSimulationForAgent();
@@ -275,7 +289,7 @@ export default function ChatPanel({
         // Structural checks run here so a flawed circuit is flagged in the same turn the
         // model built it, giving it a chance to fix things before it starts explaining.
         return withSanityNotes(
-          `Built: ${circuitToPrompt(mutation.wires, mutation.elements)}`,
+          `Built: ${circuitToPrompt(mutation.wires, mutation.elements, optimizing())}`,
           checkCircuit(mutation.wires, mutation.elements, currentPrompt.current),
         );
       }
@@ -309,6 +323,28 @@ export default function ChatPanel({
       }
     }
   }, [onAddWire, onAddElement, onApplyCircuit, onRemoveElement, onClearCanvas, onFockTruncationChange, runSimulationForAgent]);
+
+  /**
+   * Puts the pre-rewrite circuit back.
+   *
+   * The shadow refs have to move with it: they are what the next turn's `[Canvas:]` snapshot
+   * and every `#N` reference are built from, so leaving them on the discarded circuit would
+   * make the assistant argue with the canvas.
+   */
+  const handleRevert = useCallback(() => {
+    const restored = onRevertCircuit();
+    if (!restored) return;
+    workingWires.current = restored.wires;
+    workingElements.current = restored.elements;
+    simulationResultRef.current = null;
+    setDisplayMessages(prev => [...prev, {
+      id: `system-${Date.now()}`,
+      role: 'assistant',
+      text: '',
+      actions: ['↩ Reverted to the previous circuit.'],
+      isStreaming: false,
+    }]);
+  }, [onRevertCircuit]);
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -355,7 +391,7 @@ export default function ChatPanel({
 
     // Inject a live canvas + simulation snapshot so the model always has current ground
     // truth. Only this message carries one; pruneHistory strips it from older turns.
-    const canvasSnap = `[Canvas: ${circuitToPrompt(workingWires.current, workingElements.current)}]`;
+    const canvasSnap = `[Canvas: ${circuitToPrompt(workingWires.current, workingElements.current, intent === 'optimize')}]`;
     const simSnap = simulationResultRef.current
       ? `[Simulation: ${simulationResultToPrompt(simulationResultRef.current, workingWires.current, fockTruncationRef.current)}]`
       : '[Simulation: not run]';
@@ -371,6 +407,11 @@ export default function ChatPanel({
           break;
         case 'tool_start':
           pushAction(`⚙ ${TOOL_LABELS[event.toolName] ?? event.toolName}…`);
+          if (REPLACING_TOOLS.has(event.toolName)) {
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === assistantId ? { ...m, replacedCanvas: true } : m,
+            ));
+          }
           break;
         case 'tool_done':
           setDisplayMessages(prev => prev.map(m => {
@@ -547,6 +588,15 @@ export default function ChatPanel({
                         {msg.actions.map((a, i) => (
                           <p key={i} className="text-[10px] text-slate-400 font-mono">{a}</p>
                         ))}
+                        {msg.replacedCanvas && canRevert && !msg.isStreaming && (
+                          <button
+                            onClick={handleRevert}
+                            className="mt-1 text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 hover:bg-slate-600 hover:text-white transition-colors"
+                            title="Restore the circuit as it was before this change"
+                          >
+                            ↩ Revert
+                          </button>
+                        )}
                       </div>
                     )}
                     {msg.isStreaming && (

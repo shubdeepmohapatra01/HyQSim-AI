@@ -15,7 +15,23 @@
  * from the code are worse than no docs.
  */
 
-export type Intent = 'build' | 'explain' | 'analyze';
+export type Intent = 'build' | 'optimize' | 'explain' | 'analyze';
+
+/**
+ * Verbs that mean "rewrite the circuit to do the same thing more cheaply".
+ *
+ * Checked before BUILD_KEYWORDS: "optimize by replacing the CNOT chain" contains a build
+ * word, but the optimize prompt is the one that will produce a good answer. Both intents
+ * are allowed to mutate, so the precedence only decides which rules the model gets.
+ */
+export const OPTIMIZE_KEYWORDS = [
+  'optimiz', 'optimis', 'simplif', 'simpler', 'shorten', 'shallow', 'minimiz', 'minimis',
+  'compress', 'condense', 'streamline', 'refactor', 'parallelis', 'parallelize', 'tighten',
+  'fewer gates', 'less gates', 'gate count', 'circuit depth', 'reduce depth', 'reduce the depth',
+  'more efficient', 'cut down',
+  // Spelled out rather than a bare "clean", which would catch "a clean Fock distribution".
+  'clean up', 'clean it up', 'clean this up', 'clean the circuit up',
+];
 
 /** Verbs that mean "change the circuit". */
 export const BUILD_KEYWORDS = [
@@ -71,12 +87,16 @@ function hasAny(haystack: string, needles: string[]): boolean {
  *
  * Precedence is deliberate: a message that asks to *change* something is a build even if
  * it also mentions results ("add a squeeze gate and tell me the photon number") — the
- * mutation is the part that must not be skipped. Between the two read-only intents,
- * `analyze` wins, because answering a results question from structure alone is useless
- * while answering a structure question with results attached is merely wasteful.
+ * mutation is the part that must not be skipped. `optimize` outranks `build` because an
+ * optimize request is usually phrased with a build verb too ("rewrite this with fewer
+ * gates") and the optimize rules are the ones that answer it well. Between the two
+ * read-only intents, `analyze` wins, because answering a results question from structure
+ * alone is useless while answering a structure question with results attached is merely
+ * wasteful.
  */
 export function classifyIntent(message: string): Intent {
   const m = message.toLowerCase();
+  if (hasAny(m, OPTIMIZE_KEYWORDS)) return 'optimize';
   if (hasAny(m, BUILD_KEYWORDS)) return 'build';
   if (hasAny(m, ANALYZE_KEYWORDS)) return 'analyze';
   if (hasAny(m, EXPLAIN_KEYWORDS)) return 'explain';
@@ -85,9 +105,14 @@ export function classifyIntent(message: string): Intent {
   return 'explain';
 }
 
-/** Only `build` forces a structured tool call on the first turn. */
+/**
+ * The mutating intents force a structured tool call on the first turn.
+ *
+ * `optimize` is included because the failure it was written to fix is exactly an optimize
+ * turn that describes a rewrite in prose and never touches the canvas.
+ */
 export function shouldForceTools(intent: Intent): boolean {
-  return intent === 'build';
+  return intent === 'build' || intent === 'optimize';
 }
 
 /**
@@ -95,11 +120,15 @@ export function shouldForceTools(intent: Intent): boolean {
  *
  * `hasFreshResult` is simply `simulationResult !== null` — App.tsx nulls the result on
  * every circuit mutation, so a non-null result is by construction current.
+ *
+ * `optimize` runs it too, for a different reason: the model is told to re-simulate after
+ * rewriting and check the state did not move. Without a "before" in [Simulation:] there is
+ * nothing to compare against, and the check silently becomes a no-op.
  */
 export function shouldAutoRunSimulation(
   intent: Intent,
   hasFreshResult: boolean,
   hasCircuit: boolean,
 ): boolean {
-  return intent === 'analyze' && !hasFreshResult && hasCircuit;
+  return (intent === 'analyze' || intent === 'optimize') && !hasFreshResult && hasCircuit;
 }

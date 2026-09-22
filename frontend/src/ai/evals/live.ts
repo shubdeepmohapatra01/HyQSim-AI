@@ -9,11 +9,11 @@
  * Usage:
  *   GROQ_API_KEY=gsk_...  npm run ai:live
  *   ANTHROPIC_API_KEY=... npm run ai:live -- --model claude-haiku-4-5-20251001
- *   npm run ai:live -- --model llama-3.3-70b-versatile --case ghz-4 --delay 8000
+ *   npm run ai:live -- --model openai/gpt-oss-120b --case ghz-4 --delay 8000
  *
  * Compare models on the same suite (needs a key for each provider):
  *   GROQ_API_KEY=... GOOGLE_API_KEY=... \
- *     npm run ai:live -- --compare llama-3.3-70b-versatile,gemini-2.0-flash
+ *     npm run ai:live -- --compare openai/gpt-oss-120b,gemini-3.6-flash
  */
 
 import { writeFileSync } from 'node:fs';
@@ -22,10 +22,10 @@ import type { Wire, CircuitElement, SimulationResult, Gate } from '../../types/c
 import { ALL_GATES } from '../../types/circuit';
 import { runSimulation } from '../../simulation/simulator';
 import { runAgentTurn, type HistoryEntry, type StreamEvent } from '../client';
-import { MODEL_OPTIONS } from '../providers';
-import { parseToolCall, MUTATING_TOOLS } from '../tools';
+import { MODEL_OPTIONS, providerForModel } from '../providers';
+import { parseToolCall, MUTATING_TOOLS, MUTATING_INTENTS } from '../tools';
 import { circuitToPrompt, simulationResultToPrompt } from '../circuitToPrompt';
-import { decodeCircuit, encodeCircuit } from '../hqc';
+import { decodeCircuit, encodeCircuit, circuitDepth } from '../hqc';
 import { classifyIntent, shouldForceTools, shouldAutoRunSimulation } from '../intent';
 import { checkCircuit, withSanityNotes } from '../sanity';
 import { EVAL_CASES, type EvalCase } from './cases';
@@ -43,7 +43,7 @@ function arg(name: string, fallback?: string): string | undefined {
 const compareList = arg('compare');
 const modelIds = compareList
   ? compareList.split(',').map(s => s.trim()).filter(Boolean)
-  : [arg('model', 'llama-3.3-70b-versatile')!];
+  : [arg('model', 'openai/gpt-oss-120b')!];
 const caseFilter = arg('case');
 const delayMs = Number(arg('delay', '3000'));
 const outPath = arg('out', compareList ? 'ai-eval-comparison.md' : 'ai-eval-report.md')!;
@@ -65,15 +65,7 @@ const KEY_ENV: Record<string, string> = {
 };
 
 function resolveKey(id: string): { key: string; envVar: string } {
-  // providerForModel lives in providers.ts, but re-deriving here keeps this script
-  // runnable without pulling the whole module graph into scope.
-  let provider = 'openai';
-  if (id.startsWith('claude-')) provider = 'anthropic';
-  else if (id.startsWith('llama-') || id.startsWith('mixtral-') || id.startsWith('gemma-')) provider = 'groq';
-  else if (id.startsWith('gemini-')) provider = 'google';
-  else if (id.startsWith('mistral-') || id.startsWith('codestral-')) provider = 'mistral';
-  else if (id.startsWith('meta-llama/')) provider = 'together';
-  const envVar = KEY_ENV[provider];
+  const envVar = KEY_ENV[providerForModel(id) ?? 'openai'];
   return { key: process.env[envVar] ?? '', envVar };
 }
 
@@ -169,8 +161,8 @@ async function runCase(c: EvalCase, modelId: string): Promise<CaseResult> {
   }
 
   const handleToolCall = async (name: string, input: Record<string, unknown>): Promise<string> => {
-    if (MUTATING_TOOLS.has(name) && intent !== 'build') {
-      const msg = `Refused: this is a ${intent} request, not a build request.`;
+    if (MUTATING_TOOLS.has(name) && !MUTATING_INTENTS.has(intent)) {
+      const msg = `Refused: this is a ${intent} request, not a build or optimize request.`;
       toolCalls.push({ name, input, result: msg });
       return msg;
     }
@@ -294,6 +286,26 @@ async function runCase(c: EvalCase, modelId: string): Promise<CaseResult> {
     for (const e of canvas.elements) counts[e.gateId] = (counts[e.gateId] ?? 0) + 1;
     for (const [g, n] of Object.entries(c.expect.gates)) {
       if ((counts[g] ?? 0) !== n) failures.push(`${g}: expected ${n}, got ${counts[g] ?? 0}`);
+    }
+
+    if (c.expect.maxGates !== undefined && canvas.elements.length > c.expect.maxGates) {
+      failures.push(`gates: expected at most ${c.expect.maxGates}, got ${canvas.elements.length}`);
+    }
+    if (c.expect.maxDepth !== undefined) {
+      const depth = circuitDepth(canvas.elements);
+      if (depth > c.expect.maxDepth) failures.push(`depth: expected at most ${c.expect.maxDepth}, got ${depth}`);
+    }
+  }
+
+  // An optimize turn that leaves the circuit bigger than it found it has failed, whatever
+  // else it got right.
+  if (c.intent === 'optimize' && c.setup) {
+    const before = decodeCircuit(c.setup);
+    if (canvas.elements.length > before.elements.length) {
+      failures.push(`optimization grew the circuit: ${before.elements.length} -> ${canvas.elements.length} gates`);
+    }
+    if (circuitDepth(canvas.elements) > circuitDepth(before.elements)) {
+      failures.push(`optimization deepened the circuit: ${circuitDepth(before.elements)} -> ${circuitDepth(canvas.elements)}`);
     }
   }
 

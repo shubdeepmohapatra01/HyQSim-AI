@@ -1,4 +1,5 @@
 import type { HistoryEntry, ToolResult } from './providers';
+import type { PromptIntent } from './tools';
 import { buildRequest, parseResponse } from './providers';
 
 export type { HistoryEntry } from './providers';
@@ -12,20 +13,39 @@ export type StreamEvent =
   | { type: 'error'; message: string };
 
 const MAX_TURNS = 10;
-const MAX_RETRIES = 3;
+
+// Five, not three, because of how a free-tier token budget refills. Groq meters 8000 tokens
+// per *minute*, and one agent turn can charge more than that, so the wait for headroom is a
+// minute-scale event. Backoff is 5s, 10s, 20s, 30s, 30s — 95s total, which spans a reset.
+// At three the sequence gave up after 35s and the user lost a turn's work to a wait that
+// would have cleared on its own.
+const MAX_RETRIES = 5;
 
 function isToolGenerationFailure(msg: string): boolean {
   const m = msg.toLowerCase();
   return m.includes('failed to call a function') || m.includes('failed_generation');
 }
 
-// Groq validates Llama's tool call output server-side. When Llama puts JSON args inside the
-// function name (e.g. 'add_wire {"type":"qubit"}'), Groq rejects it with this message.
-// We catch it and downgrade from tool_choice:required → auto so tools remain available
-// but Groq stops hard-validating the output format.
+// Groq validates the forced tool call server-side, and fails the whole request rather than
+// returning what the model actually produced. Two shapes seen in practice:
+//
+//   'not in request.tools' / 'tool call validation failed'
+//       The model put JSON args inside the function name (e.g. 'add_wire {"type":"qubit"}').
+//
+//   'model did not call a tool'
+//       Confirmed on openai/gpt-oss-120b via `npm run ai:probe` on 2026-08-19: with
+//       tool_choice:'required', if the model answers in prose instead of calling a tool,
+//       Groq returns 400 instead of the prose. gpt-oss reasons before it calls, so a tight
+//       max_tokens makes this more likely. Groq's own docs list gpt-oss as supporting tool
+//       use — it is the forcing that is unsupported, not the tools.
+//
+// Both are recovered the same way: downgrade tool_choice:required → auto and retry. Tools
+// stay available, Groq stops hard-validating, and the turn proceeds.
 function isToolNameValidationError(msg: string): boolean {
   const m = msg.toLowerCase();
-  return m.includes('not in request.tools') || m.includes('tool call validation failed');
+  return m.includes('not in request.tools')
+    || m.includes('tool call validation failed')
+    || m.includes('model did not call a tool');
 }
 
 const MAX_RETRY_DELAY_MS = 30_000; // never wait longer than 30s regardless of Retry-After
@@ -66,13 +86,13 @@ export async function runAgentTurn(
   handleToolCall: (name: string, input: Record<string, unknown>) => Promise<string>,
   useServerProxy = false,
   /**
-   * Force a structured tool call on the first response. Only worth doing for build
-   * requests — forcing it on "explain this circuit" burns a whole round-trip making the
+   * Force a structured tool call on the first response. Only worth doing for the mutating
+   * intents — forcing it on "explain this circuit" burns a whole round-trip making the
    * model call read_circuit for data it was already handed in the snapshot.
    */
   forceFirstToolCall = false,
   /** Scopes the system prompt and tool list to what this request can actually do. */
-  intent: 'build' | 'explain' | 'analyze' = 'build',
+  intent: PromptIntent = 'build',
 ): Promise<HistoryEntry[]> {
   const entries: HistoryEntry[] = [...history];
   let withTools = true;

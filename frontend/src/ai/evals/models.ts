@@ -20,7 +20,7 @@
  * find out which genuinely work. It is paced to stay under free-tier rate limits.
  */
 
-import { MODEL_OPTIONS } from '../providers';
+import { MODEL_OPTIONS, providerForModel } from '../providers';
 
 interface ProviderProbe {
   name: string;
@@ -47,7 +47,7 @@ const PROVIDERS: ProviderProbe[] = [
     envVar: 'GROQ_API_KEY',
     url: 'https://api.groq.com/openai/v1/models',
     headers: k => ({ Authorization: `Bearer ${k}` }),
-    owns: id => id.startsWith('llama-') || id.startsWith('mixtral-') || id.startsWith('gemma-'),
+    owns: id => providerForModel(id) === 'groq',
     console: 'https://console.groq.com',
   },
   {

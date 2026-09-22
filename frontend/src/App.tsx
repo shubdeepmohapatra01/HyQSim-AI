@@ -309,7 +309,24 @@ function App() {
     }
   }, [wires, elements, gatesMap, fockTruncation, backend, backendAvailable, postSelections, shots]);
 
+  /**
+   * The circuit as it stood before the last wholesale replacement, for one-step revert.
+   *
+   * The assistant can rewrite the entire canvas in a single tool call — an optimize request
+   * does exactly that by design — and there is no undo stack in the app. Keeping one
+   * snapshot makes a bad rewrite free to walk back, which is what lets us apply the model's
+   * proposal directly instead of asking the user to confirm it first.
+   */
+  const [priorCircuit, setPriorCircuit] = useState<{ wires: Wire[]; elements: CircuitElement[] } | null>(null);
+
+  // Mirrors the live circuit so the replace/clear handlers can snapshot it without taking
+  // wires/elements as dependencies — they are handed to ChatPanel and the MCP bridge as
+  // stable callbacks.
+  const circuitRef = useRef({ wires, elements });
+  useEffect(() => { circuitRef.current = { wires, elements }; }, [wires, elements]);
+
   const handleImportCircuit = useCallback((newWires: Wire[], newElements: CircuitElement[]) => {
+    setPriorCircuit(circuitRef.current.wires.length > 0 ? circuitRef.current : null);
     setWires(newWires);
     setElements(newElements);
     setQubitCount(newWires.filter(w => w.type === 'qubit').length);
@@ -320,7 +337,21 @@ function App() {
     // setJcSweepData(null);
   }, []);
 
+  const handleRevertCircuit = useCallback(() => {
+    const prior = priorCircuit;
+    if (!prior) return null;
+    setWires(prior.wires);
+    setElements(prior.elements);
+    setQubitCount(prior.wires.filter(w => w.type === 'qubit').length);
+    setQumodeCount(prior.wires.filter(w => w.type === 'qumode').length);
+    setSimulationResult(null);
+    setPostSelections([]);
+    setPriorCircuit(null);
+    return prior;
+  }, [priorCircuit]);
+
   const handleClearCanvas = useCallback(() => {
+    setPriorCircuit(circuitRef.current.wires.length > 0 ? circuitRef.current : null);
     setWires([]);
     setElements([]);
     setQubitCount(0);
@@ -659,6 +690,8 @@ function App() {
               onClearCanvas={handleClearCanvas}
               onRunSimulation={handleRunSimulation}
               onFockTruncationChange={setFockTruncation}
+              onRevertCircuit={handleRevertCircuit}
+              canRevert={priorCircuit !== null}
               canvasVersion={canvasVersion}
               simulationResult={simulationResult}
               fockTruncation={fockTruncation}

@@ -39,6 +39,23 @@ assistant works, `WALKTHROUGH.md` for what the product is meant to feel like.
 **Status:** diagnosed from a partial `ai:live` run against `llama-3.3-70b-versatile`, not yet
 fixed. The full report was never read.
 
+> **Resolved for the free tier, 2026-08-19.** Groq retired that model (see `CHANGELOG.md`);
+> the free tier now runs `openai/gpt-oss-120b`. A full `ai:live` run on gpt-oss scores 28/31,
+> and **every case listed below now passes** — `cv-fourier`, `two-mode-squeezing`,
+> `coherent-displacement` and `cat-state-alpha` included. The qumode/qubit confusion was a
+> Llama weakness, not a prompt bug, so the prompt rewrite proposed further down is no longer
+> the priority it was. It may still be worth doing for other weak models; it is no longer
+> blocking the free path.
+>
+> **What did not clear:** `optimize-cv-merge`. Given `rotate m0; displace m1 0,0; rotate m0;
+> squeeze m1`, gpt-oss deleted *both* rotations, claiming "default angle = 0 → identity".
+> The default is `theta = pi/4` (`types/circuit.ts`), so two of them compose to `rotate m0
+> pi/2` and the expected answer keeps one. The output state happened to be unchanged only
+> because a phase rotation leaves the vacuum invariant — the reasoning was wrong and the
+> rewrite is not equivalent in general. **The fix to consider: state parameter defaults in
+> the prompt.** The model cannot see them, so it guesses, and a wrong guess about a default
+> silently changes the physics.
+
 Observed:
 
 ```
@@ -195,6 +212,17 @@ Re-enabling would also restore a fourth benchmark for the assistant.
 clients that can launch a local process. The logic is already isolated in `session.py` and
 `hqc.py` so a streamable-HTTP shell can be added without reimplementing the tools, but it
 brings hosting, auth and abuse-surface obligations.
+
+**Optimize rewrites are unverified, and MCP clients do not get them.** The `optimize` intent
+added on 2026-08-13 is prompt-hardened only: `ai/tools.ts:OPTIMIZE_RULES` tells the model to
+re-simulate and compare, but nothing checks the rewrite before it lands on the canvas — the
+safety net is the ↩ Revert button in `ChatPanel`. Two follow-ups if model-proposed rewrites
+prove unreliable: (a) a deterministic pass in `ai/hqc.ts` alongside `packColumns` for the
+mechanical cases (adjacent inverses, same-axis rotation merging), and (b) an equivalence gate
+that runs `runSimulation` on both circuits and rejects a rewrite that moves any amplitude,
+Bloch vector or ⟨n⟩. Separately, `backend/mcp_server.py` exposes the same tool surface to
+Claude Desktop with **no intent layer at all**, so an optimize request over MCP gets none of
+these rules — worth mirroring if MCP becomes the main path.
 
 **No local-model provider.** Adding an Ollama or LM Studio entry to `MODEL_OPTIONS` is about
 20 lines, since the OpenAI wire format already exists, and would give unlimited free testing

@@ -20,6 +20,13 @@ export interface ExpectedCircuit {
   gates: Record<string, number>;
   /** Optional ordered check on gate ids, ignoring params. */
   sequence?: string[];
+  /**
+   * Upper bounds, for optimize cases. An optimization is judged by whether it got cheap
+   * enough, not by whether it produced one particular circuit — several rewrites of a GHZ
+   * chain are equally valid.
+   */
+  maxGates?: number;
+  maxDepth?: number;
 }
 
 export interface EvalCase {
@@ -202,6 +209,114 @@ export const EVAL_CASES: EvalCase[] = [
     expectMentions: ['entangl'],
   },
 
+  // ── Optimize (allowed to mutate; judged on cost, not on one exact circuit) ───
+  {
+    id: 'optimize-cancel-inverses',
+    prompt: 'Optimize this circuit',
+    intent: 'optimize',
+    setup: 'W q0 q1\nG #1 h q0; #2 h q0; #3 cnot q0>q1; #4 x q1; #5 x q1',
+    reference: 'W q0 q1\nG cnot q0>q1',
+    expect: { qubits: 2, qumodes: 0, gates: { cnot: 1 }, maxGates: 1, maxDepth: 1 },
+    notes: 'Adjacent self-inverse pairs on either side of the CNOT. Five gates down to one.',
+  },
+  {
+    id: 'optimize-merge-rotations',
+    prompt: 'Can you simplify this circuit?',
+    intent: 'optimize',
+    setup: 'W q0\nG #1 h q0; #2 rz q0 pi/4; #3 rz q0 pi/4',
+    reference: 'W q0\nG h q0; rz q0 pi/2',
+    expect: { qubits: 1, qumodes: 0, gates: { h: 1, rz: 1 }, maxGates: 2, maxDepth: 2 },
+    notes: 'Same-axis rotations on one wire add. The merged angle must be pi/2, not pi/4.',
+  },
+  {
+    id: 'optimize-ghz-5',
+    prompt: 'Can you optimize the circuit and reduce its depth?',
+    intent: 'optimize',
+    setup: 'W q0 q1 q2 q3 q4\nG #1 h q0; #2 cnot q0>q1; #3 cnot q1>q2; #4 cnot q2>q3; #5 cnot q3>q4',
+    // Doubling tree: each step, every wire already holding the state copies to a fresh one.
+    reference: 'W q0 q1 q2 q3 q4\nG h q0; cnot q0>q1; cnot q0>q2; cnot q1>q3; cnot q0>q4',
+    expect: { qubits: 5, qumodes: 0, gates: { h: 1, cnot: 4 }, maxGates: 5, maxDepth: 4 },
+    notes:
+      'The case that prompted this feature. The gate count is fixed at n — every qubit has ' +
+      'to be entangled — but the depth is not: a CNOT chain is depth n because each CNOT ' +
+      'waits on the wire the last one wrote, while a doubling tree is 1+ceil(log2 n). ' +
+      'Fanning every CNOT out from q0 does NOT count: they share the control, so they ' +
+      'serialize exactly like the chain.',
+  },
+  {
+    id: 'optimize-ghz-8',
+    prompt: 'Make this circuit shallower',
+    intent: 'optimize',
+    setup:
+      'W q0 q1 q2 q3 q4 q5 q6 q7\nG #1 h q0; #2 cnot q0>q1; #3 cnot q1>q2; #4 cnot q2>q3; ' +
+      '#5 cnot q3>q4; #6 cnot q4>q5; #7 cnot q5>q6; #8 cnot q6>q7',
+    reference:
+      'W q0 q1 q2 q3 q4 q5 q6 q7\nG h q0; cnot q0>q1; cnot q0>q2; cnot q1>q3; ' +
+      'cnot q0>q4; cnot q1>q5; cnot q2>q6; cnot q3>q7',
+    expect: { qubits: 8, qumodes: 0, gates: { h: 1, cnot: 7 }, maxGates: 8, maxDepth: 4 },
+    notes: 'Where the tree pays: depth 8 down to 4, with the same eight gates.',
+  },
+  {
+    id: 'optimize-cancels-entirely',
+    prompt: 'Can you optimize this circuit',
+    intent: 'optimize',
+    setup: 'W q0 q1\nG #1 h q0; #2 x q1; #3 h q0; #4 x q1',
+    reference: 'W q0 q1\nG (none)',
+    expect: { qubits: 2, qumodes: 0, gates: {}, maxGates: 0, maxDepth: 0 },
+    notes:
+      'From a real session on llama-3.3-70b, which answered "the two H gates cancel and the ' +
+      'two X gates combine into a single X". Two traps: the pairs are NOT adjacent in the ' +
+      'execution-order list (#1/#3 and #2/#4) because independent gates share a step, and a ' +
+      'gate with no parameters cannot "merge" — x,x is the identity, leaving nothing. The ' +
+      'right answer empties the circuit, which models are reluctant to produce.',
+  },
+  {
+    id: 'optimize-cv-merge',
+    prompt: 'Simplify this circuit',
+    intent: 'optimize',
+    setup: 'W m0 m1\nG #1 rotate m0 pi/4; #2 rotate m0 pi/4; #3 displace m1 0,0; #4 squeeze m1 0.5',
+    reference: 'W m0 m1\nG rotate m0 pi/2; squeeze m1 0.5',
+    expect: { qubits: 0, qumodes: 2, gates: { rotate: 1, squeeze: 1 }, maxGates: 2, maxDepth: 1 },
+    notes:
+      'The same three rules on qumodes: repeated rotations add, a zero displacement is the ' +
+      'identity, and the two surviving gates are on different modes so they share a step.',
+  },
+  {
+    id: 'optimize-rebalance-hybrid',
+    prompt: 'Reduce the depth of this circuit',
+    intent: 'optimize',
+    setup: 'W q0 q1 q2 q3\nG #1 h q0; #2 cnot q0>q1; #3 h q2; #4 cnot q2>q3',
+    expectNoMutation: true,
+    expectMentions: ['depth'],
+    notes:
+      'Two independent blocks written one after the other. HyQSim already schedules them ' +
+      'together (depth 2, not 4), so there is nothing left to win — the model must recognise ' +
+      'that reordering is not its job rather than churning the circuit.',
+  },
+  {
+    id: 'optimize-already-minimal',
+    prompt: 'Optimize this to use fewer gates',
+    intent: 'optimize',
+    setup: 'W q0 q1\nG #1 h q0; #2 cnot q0>q1',
+    expectNoMutation: true,
+    expectMentions: ['minimal'],
+    notes: 'Nothing safe to remove. The model must say so rather than invent a rewrite.',
+  },
+  {
+    id: 'optimize-phrasing-shallower',
+    prompt: 'Make this shallower',
+    intent: 'optimize',
+    setup: GHZ4_SETUP,
+    notes: 'Classification only — this phrasing has no build verb and used to land in explain.',
+  },
+  {
+    id: 'optimize-phrasing-fewer-gates',
+    prompt: 'Can you do this with fewer gates?',
+    intent: 'optimize',
+    setup: GHZ4_SETUP,
+    notes: 'Classification only.',
+  },
+
   // ── Analyze (these auto-run HyQSim's simulator) ──────────────────────────────
   {
     id: 'analyze-output',
@@ -237,4 +352,6 @@ export const EVAL_CASES: EvalCase[] = [
 ];
 
 export const BUILD_CASES = EVAL_CASES.filter(c => c.intent === 'build');
-export const READONLY_CASES = EVAL_CASES.filter(c => c.intent !== 'build');
+export const OPTIMIZE_CASES = EVAL_CASES.filter(c => c.intent === 'optimize');
+/** Cases where a mutating tool call must be refused — the two read-only intents. */
+export const READONLY_CASES = EVAL_CASES.filter(c => c.intent === 'explain' || c.intent === 'analyze');

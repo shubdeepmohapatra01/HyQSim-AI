@@ -199,6 +199,90 @@ export function nextGateX(elements: CircuitElement[]): number {
   return maxX + GATE_SPACING;
 }
 
+/**
+ * The wires a gate acts on.
+ *
+ * `blockSpan` distinguishes the two questions that look alike but are not:
+ *
+ *  - **false — what the physics needs.** Only the endpoints. `cnot q0>q2` and `cnot q1>q3`
+ *    share no wire, so they genuinely run at the same time. This is what depth means and
+ *    what an optimizer is trying to reduce.
+ *  - **true — what the canvas can draw.** The whole span, because a two-wire gate draws a
+ *    vertical connector across the gap and a gate packed into the same column on a wire in
+ *    between would be drawn straight through that line.
+ *
+ * They disagree for exactly the circuits worth optimizing — a doubling-tree GHZ is depth
+ * 1+ceil(log2 n) but its parallel CNOTs cross, so the drawing needs more columns than the
+ * circuit needs steps. Qiskit splits this the same way: `depth()` counts the endpoints, the
+ * drawer spreads out crossing gates.
+ */
+function occupiedWires(el: CircuitElement, blockSpan: boolean): number[] {
+  const touched = [el.wireIndex, ...(el.targetWireIndices ?? [])];
+  if (!blockSpan) return touched;
+
+  const lo = Math.min(...touched);
+  const hi = Math.max(...touched);
+  const span: number[] = [];
+  for (let w = lo; w <= hi; w++) span.push(w);
+  return span;
+}
+
+/** ASAP layer index for each gate, in `orderedElements` order. */
+function assignLayers(elements: CircuitElement[], blockSpan: boolean): number[] {
+  const lastLayerOnWire = new Map<number, number>();
+
+  return orderedElements(elements).map(el => {
+    let layer = 0;
+    for (const w of occupiedWires(el, blockSpan)) {
+      const last = lastLayerOnWire.get(w);
+      if (last !== undefined && last + 1 > layer) layer = last + 1;
+    }
+    for (const w of occupiedWires(el, blockSpan)) lastLayerOnWire.set(w, layer);
+    return layer;
+  });
+}
+
+/**
+ * Packs gates into the earliest column each can legally occupy (ASAP scheduling).
+ *
+ * Without this, `nextGateX` gives every gate its own column, so a circuit's depth is always
+ * exactly its gate count and "reduce the depth" is a request nothing can satisfy. Packing
+ * makes depth a real, separate quantity: `h q0; h q1; h q2` is three gates in one column.
+ *
+ * Semantics are preserved exactly. A gate is placed strictly after the last gate on any wire
+ * it touches, so per-wire ordering never changes; gates that end up sharing a column touch
+ * no wire in common and therefore commute. `orderedElements` sorts by x with a stable sort,
+ * so within a column the array order (= the order gates were written) is what survives.
+ */
+export function packColumns(elements: CircuitElement[]): CircuitElement[] {
+  const layers = assignLayers(elements, true);
+  return orderedElements(elements).map((el, i) => ({
+    ...el,
+    position: { ...el.position, x: layers[i] * GATE_SPACING },
+  }));
+}
+
+/**
+ * Circuit depth: how many steps the circuit takes, counting gates that share no wire as
+ * simultaneous.
+ *
+ * This is the quantity an optimizer reduces, so it counts endpoints only and ignores whether
+ * the canvas can draw the result in that many columns. A GHZ built as a CNOT chain is depth
+ * n; the same state built as a doubling tree is depth 1+ceil(log2 n), which is the whole
+ * reason "reduce the depth" is a meaningful request. `packColumns` may need more columns
+ * than this to lay the tree out without crossing connectors.
+ */
+export function circuitDepth(elements: CircuitElement[]): number {
+  if (elements.length === 0) return 0;
+  return Math.max(...assignLayers(elements, false)) + 1;
+}
+
+/** Columns the canvas needs to draw the circuit — >= circuitDepth when connectors cross. */
+export function layoutColumns(elements: CircuitElement[]): number {
+  if (elements.length === 0) return 0;
+  return Math.max(...assignLayers(elements, true)) + 1;
+}
+
 export interface PlaceGateInput {
   gateId: string;
   wireLabel: string;
@@ -289,7 +373,13 @@ export function placeGate(
 
 // ─── Encoding ─────────────────────────────────────────────────────────────────
 
-/** Gates in execution order (left to right), which is what `#N` indexes. */
+/**
+ * Gates in execution order (left to right), which is what `#N` indexes.
+ *
+ * The sort must stay stable: once `packColumns` puts independent gates in the same column
+ * their x values tie, and array order is the only thing left to break the tie. `#N` refs and
+ * the simulator's execution order (simulator.ts sorts the same way) both depend on it.
+ */
 export function orderedElements(elements: CircuitElement[]): CircuitElement[] {
   return [...elements].sort((a, b) => a.position.x - b.position.x);
 }
@@ -332,6 +422,40 @@ export function encodeGates(wires: Wire[], elements: CircuitElement[]): string {
     return `#${i + 1} ${el.gateId} ${primary}${target}${params ? ` ${params}` : ''}${gen}`;
   });
   return `G ${parts.join('; ')}`;
+}
+
+/**
+ * The same gates, transposed: what each wire sees, in its own order.
+ *
+ * `encodeGates` lists gates in execution order across the whole circuit, so once independent
+ * gates are scheduled together a consecutive pair on one wire is *not* consecutive in that
+ * list — `#1 h q0; #2 x q1; #3 h q0; #4 x q1` is an h,h pair and an x,x pair, both of which
+ * read as isolated gates. Anything reasoning about cancellation or about what a wire waits
+ * for needs this view, and asking a model to transpose the list itself is asking it to fail.
+ *
+ * Two-wire gates appear on both of their wires, tagged with the `#N` from `encodeGates` so
+ * the two views can be lined up.
+ */
+export function encodeByWire(wires: Wire[], elements: CircuitElement[]): string {
+  const ordered = orderedElements(elements);
+  if (wires.length === 0) return 'empty (no wires)';
+
+  const lines = wires.map((_, i) => {
+    const label = wireLabel(wires, i);
+    const onWire = ordered
+      .map((el, n) => ({ el, n }))
+      .filter(({ el }) => el.wireIndex === i || el.targetWireIndices?.includes(i))
+      .map(({ el, n }) => {
+        const gate = GATES_BY_ID.get(el.gateId);
+        const target = el.targetWireIndices?.length ? `>${wireLabel(wires, el.targetWireIndices[0])}` : '';
+        const params = gate ? encodeParameters(gate, el.parameterValues) : '';
+        const from = el.wireIndex === i ? '' : `(${wireLabel(wires, el.wireIndex)}${target})`;
+        return `#${n + 1} ${el.gateId}${from || (target ? ` ${wireLabel(wires, el.wireIndex)}${target}` : '')}${params ? ` ${params}` : ''}`;
+      });
+    return `${label}: ${onWire.length > 0 ? onWire.join('; ') : '(none)'}`;
+  });
+
+  return lines.join('\n');
 }
 
 /** Full circuit in HQC notation — the string sent to the model as the canvas snapshot. */
@@ -511,5 +635,5 @@ export function decodeCircuit(src: string): { wires: Wire[]; elements: CircuitEl
 
   const { wires, errors: wireErrors } = decodeWires(wireLine);
   const { elements, errors: gateErrors } = decodeGates(gateLine, wires);
-  return { wires, elements, errors: [...wireErrors, ...gateErrors] };
+  return { wires, elements: packColumns(elements), errors: [...wireErrors, ...gateErrors] };
 }

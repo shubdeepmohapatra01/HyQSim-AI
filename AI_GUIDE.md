@@ -38,10 +38,16 @@ The chat panel sits below the circuit canvas. Click **AI Assistant** to expand i
 | OpenAI | No | [platform.openai.com](https://platform.openai.com) |
 | Mistral | No | [console.mistral.ai](https://console.mistral.ai) |
 
-**Groq with Llama 3.3 70B** is the practical default: no credit card, and a request budget
+**Groq with GPT-OSS 120B** is the practical default: no credit card, and a request budget
 you can actually work with. It is the weakest tool-caller of the options here, which is why
 the assistant leans on verified circuits and self-correcting errors rather than trusting the
 model's memory.
+
+> **The Llama models are gone from Groq.** `llama-3.3-70b-versatile` and
+> `llama-3.1-8b-instant` were deprecated on 2026-06-17 and shut off for the free and
+> developer tiers on 2026-08-16. Groq's own replacements — `openai/gpt-oss-120b`,
+> `openai/gpt-oss-20b`, and the preview `qwen/qwen3.6-27b` — are what the model dropdown
+> now offers, and a saved Llama selection is migrated to GPT-OSS automatically on load.
 
 **Gemini** models are also free and follow instructions better, but the free tier is tight
 (one model reported a quota limit of 5 requests) and Google closes older generations to new
@@ -171,7 +177,7 @@ The MCP tools still work, falling back to the server-side bosonic-qiskit simulat
 
 ## Keyword glossary
 
-What you say determines what the assistant does — in particular, whether it is *allowed* to change your circuit and whether it runs the simulator. There are three intents, decided from your wording before anything is sent to the model.
+What you say determines what the assistant does — in particular, whether it is *allowed* to change your circuit and whether it runs the simulator. There are four intents, decided from your wording before anything is sent to the model.
 
 ### `build` — changes the circuit
 
@@ -179,6 +185,56 @@ Triggered by: **build, create, make, construct, generate, prepare, implement, ad
 
 - The assistant is required to make a tool call rather than describe one.
 - The simulator is **not** run — press **Run Simulation** when you want results.
+
+### `optimize` — rewrites the circuit to be cheaper
+
+Triggered by: **optimize, optimise, simplify, simpler, shorten, shallower, minimize, minimise, compress, condense, streamline, refactor, parallelize, parallelise, tighten, cut down**, and the phrases **"fewer gates", "less gates", "gate count", "circuit depth", "reduce depth", "more efficient", "clean it up"**
+
+- The assistant may change the canvas, and is required to make a tool call.
+- It rewrites the **whole** circuit in one `build_circuit` call — the one case where rebuilding is preferred over `add_gate` / `remove_gate`.
+- **The simulator runs first**, so the model has the state it must preserve written down, and it is instructed to run it again afterwards and compare. If the state moved, the rewrite was wrong.
+- The rewrites it is told to trust: cancelling adjacent inverses (`h h`, `x x`, `cnot cnot`, `s sdg`), merging same-axis rotations, dropping zero-angle rotations, and reordering independent gates so they pack into fewer columns. It is told to change nothing when none of these apply.
+- **Nothing verifies the rewrite automatically** — HyQSim applies what the model proposes. That is what the **↩ Revert** button on the chat message is for: it restores the circuit exactly as it was before the rewrite.
+
+Two numbers are reported to the model on every turn, in the `[Canvas:]` snapshot:
+
+```
+gates=5 depth=5
+```
+
+**Depth** is how many steps the circuit takes, not how many gates it has. Gates whose wires never meet run at the same step: `h q0; h q1; h q2` is 3 gates at depth 1. A gate occupies its wires for its whole step, so two two-qubit gates sharing even one qubit must run in different steps.
+
+Depth is often the only thing left to win, since many circuits need a fixed number of gates. `OPTIMIZE_RULES` gives the model two levers, both stated structurally rather than as a list of known circuits:
+
+- **Fewer gates on the critical path** — cancel neighbouring inverses on the same wires, merge repeated same-axis operations on one wire into one whose parameters add, drop anything that comes to identity.
+- **A shorter critical path for the same result** — where the circuit extends one wire's state onto fresh wires one at a time, every wire that already carries it can extend to a new one in the same step: a balanced tree instead of a line, *k* steps down to about log₂*k*.
+
+**Reordering is explicitly not a lever.** HyQSim runs `packColumns` over every circuit it applies, so independent gates are already scheduled together whatever order the model wrote them in. The prompt says so, to stop the model "parallelizing" by shuffling a gate list and claiming a win it did not produce. What only the model can do is change the dependency structure.
+
+An 8-qubit GHZ makes the second lever concrete. It needs 8 gates however it is built:
+
+| Construction | Gates | Depth |
+|---|---|---|
+| CNOT chain, `q0→q1→q2→…` | 8 | **8** — each CNOT waits on the wire the last one wrote |
+| Fan-out, every CNOT controlled by `q0` | 8 | **8** — they share the control, so they serialize just like the chain |
+| Doubling tree: `h q0` → `cnot q0>q1` → `cnot q0>q2` + `cnot q1>q3` → `cnot q0>q4` + `cnot q1>q5` + `cnot q2>q6` + `cnot q3>q7` | 8 | **4** — 1+⌈log₂n⌉ |
+
+The same levers apply on qumodes and hybrid circuits — repeated `rotate` gates on one mode merge, a zero-amplitude `displace` is the identity — and the eval suite covers both so the rules cannot quietly become DV-only.
+
+**Optimize turns get an extra view of the circuit.** The `G …` line lists gates in execution order *across all wires*, so once independent gates are scheduled into the same step, a consecutive pair on one wire is no longer consecutive in that list — `#1 h q0; #2 x q1; #3 h q0; #4 x q1` is an h,h pair and an x,x pair, but reads as four isolated gates. The snapshot therefore transposes it:
+
+```
+W q0 q1
+G #1 h q0; #2 x q1; #3 h q0; #4 x q1
+By wire:
+q0: #1 h; #3 h
+q1: #2 x; #4 x
+gates=4 depth=2
+```
+
+Only the `optimize` intent pays for this — it roughly doubles the circuit's share of the snapshot, and it is the only intent that has to reason about consecutive gates on one wire.
+
+**Depth is not the same as the number of columns drawn.** The tree's parallel CNOTs cross — the connector for `cnot q0>q2` runs through q1's row — and the canvas gives crossing gates separate columns so the drawing stays readable. `circuitDepth()` counts the endpoints (the physics), `layoutColumns()` counts what the canvas needs. Qiskit splits these the same way: `depth()` versus what its drawer prints.
 
 ### `explain` — describes the circuit
 
@@ -196,9 +252,10 @@ Triggered by: **what output, what result, what will, what would, what happens, a
 
 ### Precedence
 
-1. A message containing any **build** word is a build, even if it also asks about results — *"add a squeeze gate and tell me the photon number"* adds the gate first.
-2. Otherwise **analyze** wins over **explain**, because answering a results question without numbers is useless.
-3. Unrecognised phrasing is treated as **explain**. Guessing "build" would let a misread question wipe your canvas.
+1. **optimize** is checked first. An optimize request is usually phrased with a build verb too — *"rewrite this with fewer gates"* — and the optimize rules are the ones that answer it well. Both intents may mutate, so the precedence only decides which rules the model gets.
+2. Otherwise a message containing any **build** word is a build, even if it also asks about results — *"add a squeeze gate and tell me the photon number"* adds the gate first.
+3. Otherwise **analyze** wins over **explain**, because answering a results question without numbers is useless.
+4. Unrecognised phrasing is treated as **explain**. Guessing "build" would let a misread question wipe your canvas.
 
 These lists live in `frontend/src/ai/intent.ts` and are covered by tests, so this table and the code stay in step.
 
@@ -244,6 +301,22 @@ at the default 8 the distribution is badly truncated.
 | `Add another qumode to the circuit` | Appends a wire |
 | `Change the displacement to alpha = 2.5` | Adjusts parameters in place |
 
+### Optimizing
+
+| Prompt | Result |
+|---|---|
+| `Optimize this circuit` | Cancels adjacent inverse pairs, merges same-axis rotations, repacks columns; reports gates and depth before vs after |
+| `Make this shallower` | Same, aimed at depth rather than gate count |
+| `Can you do this with fewer gates?` | Same, aimed at gate count |
+| `Optimize it by replacing the CNOT chain` | Still an optimize, despite the build verb |
+
+The assistant should decline when there is nothing safe to do — a Bell pair is already
+minimal. But a GHZ chain is *not* a decline case: its gate count is fixed while its depth is
+not, so the right answer there is the doubling tree above. If it rewrites a genuinely minimal
+circuit anyway, or produces a tree that does not reproduce the state, that is a weak model,
+not a feature: press **↩ Revert** and try a stronger one. This is the area where model choice
+matters most, because nothing checks the rewrite for you.
+
 ### Explaining and analysing
 
 | Prompt | What you get |
@@ -272,15 +345,24 @@ at the default 8 the distribution is badly truncated.
 
 ### Model-specific quirks
 
-**Llama 3.3 70B (Groq)** — free and fast, but the weakest tool-caller here:
+**GPT-OSS 120B (Groq)** — free and fast, and the strongest of the free options. Groq
+recommends it as the replacement for the retired Llama 3.3 70B.
 
 | Behaviour | What to expect |
 |---|---|
-| **Tool call format** | Sometimes emits `<function=...>` as plain text; the assistant detects and executes those anyway |
-| **Continuous-variable requests** | Its weakest area. May build *qubit* wires for a qumode request. Say `"use a qumode wire m0, not qubits"` if so |
-| **Circuit size** | Reliable to roughly 6–8 gates; break very large circuits into steps |
-| **Parameters** | Often writes `1.5708` rather than `pi/2` — numerically the same, both accepted |
+| **Tool calls** | Real `tool_calls`, one at a time — Groq's gpt-oss does not do *parallel* tool calls, so a multi-step request costs several round-trips |
+| **Forced tool calls** | Groq rejects `tool_choice: 'required'` with a 400 when the model answers in prose instead. The assistant catches that and retries with `'auto'`, so tools stay available |
+| **Continuous-variable requests** | Every CV *construction* case passes (`cv-fourier`, `two-mode-squeezing`, `coherent-displacement`, `squeezed-vacuum`, `jc-hybrid`). This is the clearest gain over the retired Llama, which failed all of them. CV *optimization* is still shaky — see `optimize-cv-merge` in `NEXT_STEPS.md` |
+| **Circuit size** | 131K context, so the prompt is never the limit; `maxTokens` is capped at 2048 to stay inside the free tier's TPM budget |
+| **Parameters** | Both `1.5708` and `pi/2` are accepted |
 | **Rate limits** | TPM-metered free tier; the assistant backs off and retries automatically |
+
+**Qwen3.6 27B (Groq)** — the only free Groq model that still does parallel tool calls, which
+makes multi-step edits cheaper. It is a *preview* model: Groq's docs say evaluation only, and
+preview ids get pulled without a deprecation window.
+
+**GPT-OSS 20B (Groq)** — same family, much faster, noticeably weaker at multi-step tool use.
+Worth it only when 120B is rate-limiting you.
 
 **Gemini Flash** — better instruction-following, but a small free-tier request budget and
 Google closes older generations to new keys. Verify with `npm run ai:models -- --verify`.
@@ -366,24 +448,24 @@ Three changes account for most of it:
 
 ### The model matters as much as the token count
 
-Not all models drive this equally well. **Llama 3.3 70B on Groq is the weakest tool-caller
-of the options here** — the codebase carries three workarounds that exist solely for it:
-recovering tool calls it emits as `<function=...>` plain text, handling it putting JSON
-arguments *inside* the function name, and stripping `<|python_tag|>` from replies. None are
-needed for Claude, GPT-4o, or Gemini. It is also the most likely to ignore a soft
-instruction such as "call `load_benchmark` rather than rebuilding".
+Not all models drive this equally well. The free tier is the weak end, and the codebase
+carries three workarounds written for models at that end: recovering tool calls emitted as
+`<function=...>` plain text, handling JSON arguments placed *inside* the function name, and
+stripping special tokens such as `<|python_tag|>` from replies. They were written for Llama,
+which Groq has since retired; they are kept because they are cheap, they are exactly the
+failure modes small open-weight models produce, and gpt-oss emits `<|channel|>`-style tokens
+of its own. None are needed for Claude, GPT-4o, or Gemini.
 
 **If circuits come out subtly wrong, try a different model before rewriting the prompt.**
-The Gemini Flash models follow instructions better than Llama, but their free tier is small
-enough that Groq is usually the more practical choice for iteration. A paid Anthropic or
-OpenAI key, or the MCP route on an existing Claude subscription, avoids the quota wall
-entirely.
+The Gemini Flash models follow instructions well, but their free tier is small enough that
+Groq is usually the more practical choice for iteration. A paid Anthropic or OpenAI key, or
+the MCP route on an existing Claude subscription, avoids the quota wall entirely.
 
 To measure it rather than guess:
 
 ```bash
 GROQ_API_KEY=... GOOGLE_API_KEY=... \
-  npm run ai:live -- --compare llama-3.3-70b-versatile,gemini-3.6-flash
+  npm run ai:live -- --compare openai/gpt-oss-120b,gemini-3.6-flash
 ```
 
 That writes `ai-eval-comparison.md` with a side-by-side scoreboard — passes, tool errors,
@@ -392,11 +474,44 @@ followed by the full transcripts for each.
 
 ### Still hitting rate limits?
 
-Free tiers meter tokens per minute, not per request. If Groq rate-limits you, the assistant backs off and retries automatically (up to 3 times, capped at 30 s).
+Free tiers meter tokens per minute, not per request. If Groq rate-limits you, the assistant
+backs off and retries automatically (up to 5 times, capped at 30 s — about 95 s in total,
+which is enough to span a per-minute reset).
 
-- **Switch to Gemini 2.0 Flash** — a much larger free-tier budget.
-- **Clear the canvas** between unrelated circuits. This resets the conversation history.
-- **Use MCP instead.** No API tokens at all.
+**The numbers, measured against a live free-tier key on 2026-08-19.** All three free Groq
+models share the same budget, so switching between them does not help:
+
+| Limit | Value |
+|---|---|
+| Tokens per minute (TPM) | 8,000 |
+| Tokens per **day** (TPD) | 200,000 |
+| Requests per minute | 1,000 (never the binding constraint) |
+
+And the trap that makes TPM bite harder than it looks:
+
+> **Groq charges the `max_tokens` you *request*, not the tokens you use.** A request with
+> `max_tokens: 2048` that returned 130 tokens still drew **2,110** off the minute's budget.
+
+So one agent turn — tool call, then simulation, then the answer, each resending the
+conversation at roughly 2.5k input — charges about 13.7k against an 8k/min budget. It will
+rate-limit itself partway through and then recover on the backoff. That is expected on the
+free tier, not a bug.
+
+What actually helps:
+
+- **Pace yourself.** Roughly one prompt per minute is the sustainable rate. A day's budget is
+  about 15–20 full agent turns, and a single `npm run ai:live` sweep spends most of it.
+- **Clear the canvas** between unrelated circuits. This resets the conversation history, which
+  is the largest part of each request.
+- **Prefer `explain` and `analyze` phrasings** when you don't need a rewrite — they carry
+  neither the gate catalogue nor the mutating tool schemas, and cost roughly a fifth as much.
+- **Switch to Gemini Flash** — a different budget, though also a small one.
+- **Use MCP instead.** No API tokens at all, and no per-minute metering.
+
+**Do not "fix" this by lowering `maxTokens` in `providers.ts`.** It was tried and measured:
+gpt-oss spends that budget on reasoning before it answers, and at 1024 the optimizer produced
+demonstrably worse circuits (`optimize-ghz-5` came back at depth 5 instead of 4). Waiting is
+the cheaper trade.
 
 ---
 
@@ -431,7 +546,7 @@ reports the first that fails.
 
 ```bash
 GOOGLE_API_KEY=... npm run ai:probe -- --model gemini-3.6-flash
-npm run ai:probe -- --model llama-3.3-70b-versatile --delay 3000
+npm run ai:probe -- --model openai/gpt-oss-120b --delay 3000
 ```
 
 Rate-limit responses are reported as *untested*, never as a rejection, and a failing baseline
@@ -452,11 +567,11 @@ Runs the real prompt suite against a real provider and writes `ai-eval-report.md
 ```bash
 GROQ_API_KEY=gsk_...  npm run ai:live
 ANTHROPIC_API_KEY=... npm run ai:live -- --model claude-haiku-4-5-20251001
-npm run ai:live -- --model llama-3.3-70b-versatile --case ghz-4 --delay 8000
+npm run ai:live -- --model openai/gpt-oss-120b --case ghz-4 --delay 8000
 
 # Two models on the same suite → ai-eval-comparison.md
 GROQ_API_KEY=... GOOGLE_API_KEY=... \
-  npm run ai:live -- --compare llama-3.3-70b-versatile,gemini-3.6-flash
+  npm run ai:live -- --compare openai/gpt-oss-120b,gemini-3.6-flash
 ```
 
 `--delay` (default 3000 ms) paces requests so a free tier's per-minute budget is not tripped.

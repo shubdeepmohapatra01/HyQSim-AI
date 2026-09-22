@@ -9,12 +9,18 @@
 
 import { describe, it, expect } from 'vitest';
 import type { Wire, CircuitElement } from '../../types/circuit';
-import { parseToolCall, MUTATING_TOOLS } from '../tools';
-import { decodeCircuit, encodeCircuit, parseNumber, resolveElementRef, canonicalGateId } from '../hqc';
+import { parseToolCall, MUTATING_TOOLS, MUTATING_INTENTS, toolsForIntent, buildSystemPrompt } from '../tools';
+import {
+  decodeCircuit, encodeCircuit, parseNumber, resolveElementRef, canonicalGateId,
+  packColumns, circuitDepth, layoutColumns, encodeByWire,
+} from '../hqc';
 import { classifyIntent, shouldForceTools, shouldAutoRunSimulation } from '../intent';
 import { buildBenchmark, listBenchmarks } from '../benchmarks';
 import { checkCircuit, withSanityNotes } from '../sanity';
-import { EVAL_CASES, BUILD_CASES, READONLY_CASES } from './cases';
+import { circuitToPrompt } from '../circuitToPrompt';
+import { EVAL_CASES, BUILD_CASES, OPTIMIZE_CASES, READONLY_CASES } from './cases';
+import { MODEL_OPTIONS, RETIRED_MODELS, providerForModel, resolveModelId, buildRequest } from '../providers';
+import { runAgentTurn } from '../client';
 
 /** Applies a mutation the way ChatPanel does, returning the new circuit. */
 function apply(
@@ -131,6 +137,108 @@ describe('HQC round-trip', () => {
   });
 });
 
+describe('column packing', () => {
+  const depthOf = (hqc: string) => circuitDepth(decodeCircuit(hqc).elements);
+
+  it('puts independent single-wire gates in one column', () => {
+    expect(depthOf('W q0 q1 q2\nG h q0; h q1; h q2')).toBe(1);
+  });
+
+  it('keeps gates that share a wire in sequence', () => {
+    expect(depthOf('W q0\nG h q0; x q0; h q0')).toBe(3);
+  });
+
+  it('cannot compress a GHZ CNOT chain as written — each CNOT needs the previous one', () => {
+    expect(depthOf('W q0 q1 q2 q3\nG h q0; cnot q0>q1; cnot q1>q2; cnot q2>q3')).toBe(4);
+  });
+
+  it('packs a two-qubit gate alongside work on unrelated wires', () => {
+    expect(depthOf('W q0 q1 q2 q3\nG cnot q0>q1; cnot q2>q3')).toBe(1);
+  });
+
+  it('sees the depth win in a doubling-tree GHZ', () => {
+    // Copy from every wire that already holds the state, so the CNOTs double each step:
+    // depth 1+ceil(log2 n) instead of n. This is the rewrite that makes "reduce the depth"
+    // a real request, and the reason depth counts endpoints rather than spans.
+    const chain8 = 'W q0 q1 q2 q3 q4 q5 q6 q7\nG h q0; cnot q0>q1; cnot q1>q2; cnot q2>q3; ' +
+      'cnot q3>q4; cnot q4>q5; cnot q5>q6; cnot q6>q7';
+    const tree8 = 'W q0 q1 q2 q3 q4 q5 q6 q7\nG h q0; cnot q0>q1; cnot q0>q2; cnot q1>q3; ' +
+      'cnot q0>q4; cnot q1>q5; cnot q2>q6; cnot q3>q7';
+    expect(depthOf(chain8)).toBe(8);
+    expect(depthOf(tree8)).toBe(4);
+  });
+
+  it('does not credit a fan-out GHZ, whose CNOTs all share one control', () => {
+    // A qubit cannot be in two two-qubit gates at once, so these serialize like the chain.
+    expect(depthOf('W q0 q1 q2 q3 q4\nG h q0; cnot q0>q1; cnot q0>q2; cnot q0>q3; cnot q0>q4')).toBe(5);
+  });
+
+  it('separates depth from the columns the canvas needs to draw', () => {
+    // The connector from q0 to q2 runs straight through q1's row, so the layout has to give
+    // the H its own column — but the two gates share no wire and really are simultaneous.
+    const { elements } = decodeCircuit('W q0 q1 q2\nG cnot q0>q2; h q1');
+    expect(circuitDepth(elements)).toBe(1);
+    expect(layoutColumns(elements)).toBe(2);
+    expect(new Set(elements.map(e => e.position.x)).size).toBe(2);
+  });
+
+  it('treats a hybrid gate as occupying both lanes', () => {
+    expect(depthOf('W q0 m0\nG cdisp q0>m0 2,0; h q0')).toBe(2);
+    expect(depthOf('W q0 m0\nG h q0; cdisp q0>m0 2,0')).toBe(2);
+  });
+
+  it('preserves execution order within a column', () => {
+    const { wires, elements } = decodeCircuit('W q0 q1 q2\nG h q0; x q1; y q2');
+    expect(encodeCircuit(wires, elements)).toBe('W q0 q1 q2\nG #1 h q0; #2 x q1; #3 y q2');
+  });
+
+  it('is idempotent', () => {
+    const { elements } = decodeCircuit('W q0 q1 q2\nG h q0; cnot q0>q1; h q2');
+    const once = packColumns(elements);
+    expect(packColumns(once).map(e => e.position.x)).toEqual(once.map(e => e.position.x));
+  });
+
+  it('reports zero depth for an empty circuit', () => {
+    expect(circuitDepth([])).toBe(0);
+  });
+});
+
+describe('per-wire view', () => {
+  const byWire = (hqc: string) => {
+    const { wires, elements } = decodeCircuit(hqc);
+    return encodeByWire(wires, elements);
+  };
+
+  it('puts a cancelling pair next to itself even when the gate list separates them', () => {
+    // The execution-order list reads "#1 h q0; #2 x q1; #3 h q0; #4 x q1" — neither pair is
+    // adjacent in it, because the two wires are independent and share their steps. A model
+    // asked to spot cancellations from that list sees four isolated gates.
+    expect(byWire('W q0 q1\nG h q0; h q0; x q1; x q1')).toBe('q0: #1 h; #3 h\nq1: #2 x; #4 x');
+  });
+
+  it('lists a two-wire gate on both of its wires', () => {
+    expect(byWire('W q0 q1\nG h q0; cnot q0>q1')).toBe(
+      'q0: #1 h; #2 cnot q0>q1\nq1: #2 cnot(q0>q1)',
+    );
+  });
+
+  it('shows a wire with nothing on it', () => {
+    expect(byWire('W q0 q1\nG h q0')).toBe('q0: #1 h\nq1: (none)');
+  });
+
+  it('carries parameters through, so mergeable rotations are visible as a pair', () => {
+    expect(byWire('W m0\nG rotate m0 pi/2; rotate m0 pi/2')).toBe(
+      'm0: #1 rotate 1.5708; #2 rotate 1.5708',
+    );
+  });
+
+  it('is only attached to the snapshot when asked for', () => {
+    const { wires, elements } = decodeCircuit('W q0 q1\nG h q0; h q0; x q1; x q1');
+    expect(circuitToPrompt(wires, elements)).not.toContain('By wire:');
+    expect(circuitToPrompt(wires, elements, true)).toContain('By wire:\nq0: #1 h; #3 h');
+  });
+});
+
 describe('build_circuit', () => {
   it.each(BUILD_CASES.filter(c => c.reference && !c.setup))('builds $id', (c) => {
     const { wires, elements, error } = apply([], [], 'build_circuit', toSpecs(c.reference!));
@@ -146,6 +254,34 @@ describe('build_circuit', () => {
     if (c.expect!.sequence) {
       const ordered = [...elements].sort((a, b) => a.position.x - b.position.x).map(e => e.gateId);
       expect(ordered).toEqual(c.expect!.sequence);
+    }
+  });
+
+  it('applies the optimize cases as a whole-circuit replacement', () => {
+    for (const c of OPTIMIZE_CASES.filter(x => x.reference && x.expect)) {
+      // Seed the canvas the way an optimize turn finds it, then replay the rewrite.
+      const before = apply([], [], 'build_circuit', toSpecs(c.setup!));
+      expect(before.error, c.id).toBeNull();
+
+      const after = apply(before.wires, before.elements, 'build_circuit', toSpecs(c.reference!));
+      expect(after.error, c.id).toBeNull();
+
+      const s = structure(after.wires, after.elements);
+      expect(s.qubits, c.id).toBe(c.expect!.qubits);
+      expect(s.qumodes, c.id).toBe(c.expect!.qumodes);
+      for (const [gateId, n] of Object.entries(c.expect!.gates)) {
+        expect(s.gates[gateId] ?? 0, `${c.id} expected ${n}x ${gateId}`).toBe(n);
+      }
+      if (c.expect!.maxGates !== undefined) {
+        expect(after.elements.length, `${c.id} gate count`).toBeLessThanOrEqual(c.expect!.maxGates);
+      }
+      if (c.expect!.maxDepth !== undefined) {
+        expect(circuitDepth(after.elements), `${c.id} depth`).toBeLessThanOrEqual(c.expect!.maxDepth);
+      }
+      // An optimization that costs more than the circuit it replaced is not one.
+      expect(after.elements.length, `${c.id} must not grow`).toBeLessThanOrEqual(before.elements.length);
+      expect(circuitDepth(after.elements), `${c.id} must not deepen`)
+        .toBeLessThanOrEqual(circuitDepth(before.elements));
     }
   });
 
@@ -261,13 +397,41 @@ describe('intent classification', () => {
     expect(classifyIntent(c.prompt)).toBe(c.intent);
   });
 
-  it('only forces a tool call for build requests', () => {
+  it('only forces a tool call for the mutating intents', () => {
     for (const c of BUILD_CASES) expect(shouldForceTools(classifyIntent(c.prompt))).toBe(true);
+    for (const c of OPTIMIZE_CASES) expect(shouldForceTools(classifyIntent(c.prompt))).toBe(true);
     for (const c of READONLY_CASES) expect(shouldForceTools(classifyIntent(c.prompt))).toBe(false);
   });
 
   it('treats a mutation request as build even when it also asks about results', () => {
     expect(classifyIntent('Add a squeeze gate and tell me the photon number')).toBe('build');
+  });
+
+  it('reads an optimize request as optimize, not explain', () => {
+    // Every one of these used to land in `explain`, where mutating tools are refused —
+    // which is why "can you optimize the circuit" could not change anything.
+    for (const p of [
+      'can you optimize the circuit',
+      'optimise this circuit please',
+      'simplify the circuit',
+      'make this shallower',
+      'can you do this with fewer gates?',
+      'reduce the depth of this circuit',
+      'this is more gates than it needs, clean it up',
+      'parallelize the CNOTs',
+    ]) {
+      expect(classifyIntent(p), p).toBe('optimize');
+    }
+  });
+
+  it('prefers optimize over build when a request is phrased as both', () => {
+    expect(classifyIntent('rewrite this circuit with fewer gates')).toBe('optimize');
+    expect(classifyIntent('optimize it by replacing the CNOT chain')).toBe('optimize');
+  });
+
+  it('does not read a results question as optimize', () => {
+    expect(classifyIntent('what is the photon number of this state?')).toBe('analyze');
+    expect(classifyIntent('is the squeezing reducing the variance?')).toBe('analyze');
   });
 
   it('falls back to explain on unrecognised phrasing, never to build', () => {
@@ -290,6 +454,12 @@ describe('simulation trigger policy', () => {
     expect(shouldAutoRunSimulation('build', false, true)).toBe(false);
   });
 
+  it('runs for optimize, so the model has a before-state to check its rewrite against', () => {
+    expect(shouldAutoRunSimulation('optimize', false, true)).toBe(true);
+    expect(shouldAutoRunSimulation('optimize', true, true)).toBe(false);
+    expect(shouldAutoRunSimulation('optimize', false, false)).toBe(false);
+  });
+
   it('does not run on an empty canvas', () => {
     expect(shouldAutoRunSimulation('analyze', false, false)).toBe(false);
   });
@@ -298,12 +468,32 @@ describe('simulation trigger policy', () => {
 describe('read-only intents cannot mutate the canvas', () => {
   it.each(READONLY_CASES)('$id is guarded', (c) => {
     const intent = classifyIntent(c.prompt);
-    expect(intent).not.toBe('build');
-    // ChatPanel refuses any mutating tool when the intent is not build. Assert the tool
+    expect(MUTATING_INTENTS.has(intent)).toBe(false);
+    // ChatPanel refuses any mutating tool when the intent is read-only. Assert the tool
     // set that guard covers is the complete set of mutating tools.
     expect([...MUTATING_TOOLS].sort()).toEqual(
       ['add_gate', 'add_wire', 'build_circuit', 'clear_circuit', 'load_benchmark', 'remove_gate'],
     );
+  });
+
+  it('offers the mutating tools to build and optimize only', () => {
+    for (const intent of ['build', 'optimize'] as const) {
+      expect(toolsForIntent(intent).map(t => t.name)).toEqual(expect.arrayContaining([...MUTATING_TOOLS]));
+    }
+    for (const intent of ['explain', 'analyze'] as const) {
+      const names = toolsForIntent(intent).map(t => t.name);
+      expect(names.some(n => MUTATING_TOOLS.has(n))).toBe(false);
+    }
+  });
+
+  it('gives optimize the rewrite rules the other intents do not pay for', () => {
+    const optimize = buildSystemPrompt('optimize');
+    expect(optimize).toContain('## Optimizing');
+    // It still needs the gate catalogue and HQC rules to write a replacement circuit.
+    expect(optimize).toContain('## Gates');
+    for (const intent of ['build', 'explain', 'analyze'] as const) {
+      expect(buildSystemPrompt(intent), intent).not.toContain('## Optimizing');
+    }
   });
 });
 
@@ -504,5 +694,139 @@ describe('empty-circuit guard', () => {
   it('does not flag a circuit that has gates', () => {
     const { wires, elements } = decodeCircuit('W q0 q1\nG h q0; cnot q0>q1');
     expect(checkCircuit(wires, elements)).toEqual([]);
+  });
+});
+
+describe('model registry', () => {
+  it('offers no model id the provider has retired', () => {
+    for (const id of Object.keys(RETIRED_MODELS)) {
+      expect(MODEL_OPTIONS.some(m => m.id === id), `${id} is retired but still offered`).toBe(false);
+    }
+  });
+
+  it('points every retirement at a model that is actually offered', () => {
+    for (const [dead, replacement] of Object.entries(RETIRED_MODELS)) {
+      expect(MODEL_OPTIONS.some(m => m.id === replacement), `${dead} -> ${replacement}`).toBe(true);
+    }
+  });
+
+  it('rewrites a saved retired id and passes a live one through', () => {
+    // The selected model is persisted in localStorage; without this a returning user keeps
+    // an id that is not in MODEL_OPTIONS, so the base URL falls back to another provider's.
+    expect(resolveModelId('llama-3.3-70b-versatile')).toBe('openai/gpt-oss-120b');
+    expect(resolveModelId('gpt-4o')).toBe('gpt-4o');
+  });
+
+  it('routes every offered model to some provider', () => {
+    for (const m of MODEL_OPTIONS) {
+      expect(providerForModel(m.id), m.id).not.toBeNull();
+    }
+  });
+
+  it('reads Groq vendor-prefixed ids as Groq, not as the vendor', () => {
+    // Groq serves 'openai/gpt-oss-120b' and 'qwen/qwen3.6-27b'. Matching on the vendor name
+    // would send them to OpenAI and Together respectively, with the wrong key and host.
+    expect(providerForModel('openai/gpt-oss-120b')).toBe('groq');
+    expect(providerForModel('openai/gpt-oss-20b')).toBe('groq');
+    expect(providerForModel('qwen/qwen3.6-27b')).toBe('groq');
+    expect(providerForModel('gpt-4o')).toBe('openai');
+    expect(providerForModel('meta-llama/Llama-3.3-70B-Instruct-Turbo')).toBe('together');
+  });
+
+  it('sends a Groq model to the Groq endpoint carrying the mutating tools', () => {
+    const groq = MODEL_OPTIONS.find(m => m.id === 'openai/gpt-oss-120b')!;
+    const { url, options } = buildRequest(
+      'key', groq.baseUrl, groq.id, groq.apiFormat,
+      [{ kind: 'user', text: 'Optimize this circuit' }], true, true, false, 'optimize',
+    );
+    // In dev the base URL is the Vite proxy prefix; in a build it is the real host.
+    expect(url).toMatch(/^(https:\/\/api\.groq\.com|\/proxy\/groq)\/openai\/v1\/chat\/completions$/);
+    const body = JSON.parse(String(options.body));
+    expect(body.model).toBe('openai/gpt-oss-120b');
+    expect(body.tool_choice).toBe('required');
+    expect(body.tools.map((t: { function: { name: string } }) => t.function.name)).toContain('build_circuit');
+  });
+});
+
+describe('forced-tool-call recovery', () => {
+  /** Replays a two-response exchange, capturing the request body each turn. */
+  async function runWith(firstResponse: Response) {
+    const bodies: Record<string, unknown>[] = [];
+    let call = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, options: RequestInit) => {
+      bodies.push(JSON.parse(String(options.body)));
+      if (++call === 1) return firstResponse;
+      // Third turn onward: plain text, which is what ends the agent loop.
+      if (call > 2) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'Done.' } }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: null,
+            tool_calls: [{
+              id: 'c1', type: 'function',
+              function: { name: 'build_circuit', arguments: '{"wires":"q0 q1","gates":"cnot q0>q1"}' },
+            }],
+          },
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+
+    const groq = MODEL_OPTIONS.find(m => m.id === 'openai/gpt-oss-120b')!;
+    const applied: string[] = [];
+    try {
+      await runAgentTurn(
+        'k', groq.id, groq.baseUrl, groq.apiFormat,
+        [{ kind: 'user', text: 'Optimize this circuit' }],
+        () => {},
+        async (name) => { applied.push(name); return 'ok'; },
+        false, true, 'optimize',
+      );
+    } finally {
+      globalThis.fetch = original;
+    }
+    return { bodies, applied };
+  }
+
+  function groqError(message: string) {
+    return new Response(JSON.stringify({ error: { message } }), {
+      status: 400, headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  // Confirmed against Groq on 2026-08-19 via `npm run ai:probe --model openai/gpt-oss-120b`:
+  // with tool_choice:'required', a model that answers in prose fails the whole request
+  // rather than returning the prose. Without the downgrade the user sees a bare 400.
+  it('downgrades tool_choice when Groq rejects the forced call', async () => {
+    const { bodies, applied } = await runWith(
+      groqError('Tool choice is required, but model did not call a tool'));
+
+    // Rejected forced call → retry with 'auto' → a third turn carrying the tool result.
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0].tool_choice).toBe('required');
+    expect(bodies[1].tool_choice).toBe('auto');
+    expect(bodies[1].tools, 'tools must stay available after the downgrade').toBeDefined();
+    expect(applied).toEqual(['build_circuit']);
+  });
+
+  it('downgrades on the malformed-tool-name rejection too', async () => {
+    const { bodies, applied } = await runWith(
+      groqError("tool call validation failed: 'add_wire {\"type\":\"qubit\"}' not in request.tools"));
+
+    expect(bodies[1].tool_choice).toBe('auto');
+    expect(applied).toEqual(['build_circuit']);
+  });
+
+  it('drops tools entirely when the model cannot generate a call at all', async () => {
+    const { bodies } = await runWith(groqError('Failed to call a function. Please adjust your prompt.'));
+    expect(bodies[1].tools).toBeUndefined();
+  });
+
+  it('surfaces an unrelated error instead of silently retrying', async () => {
+    const { bodies } = await runWith(groqError('Invalid API key'));
+    expect(bodies, 'a real error must not trigger a retry').toHaveLength(1);
   });
 });

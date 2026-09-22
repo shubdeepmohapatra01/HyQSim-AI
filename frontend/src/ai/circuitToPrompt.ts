@@ -10,7 +10,7 @@
  */
 
 import type { Wire, CircuitElement, SimulationResult } from '../types/circuit';
-import { encodeCircuit, wireLabel, wireLabelToIndex } from './hqc';
+import { encodeCircuit, encodeByWire, circuitDepth, wireLabel, wireLabelToIndex } from './hqc';
 import { wignerFromState, computeWignerFeatures, formatWignerFeatures } from '../simulation/wignerFeatures';
 
 export { wireLabel, wireLabelToIndex };
@@ -21,9 +21,31 @@ const FEATURE_GRID = 48;
 /** Fock levels below this probability are omitted. */
 const FOCK_FLOOR = 0.001;
 
-/** Serializes the current circuit in HQC notation. */
-export function circuitToPrompt(wires: Wire[], elements: CircuitElement[]): string {
-  return encodeCircuit(wires, elements);
+/**
+ * Serializes the current circuit in HQC notation, with its cost metrics.
+ *
+ * The `gates=N depth=M` line is what makes an optimize request answerable: without it the
+ * model has no measure to improve and no way to report what it achieved. It is appended
+ * here rather than inside `encodeCircuit` because that encoding is mirrored byte-for-byte by
+ * `backend/simulation/hqc.py` and asserted by `shared/hqc_cases.json`.
+ */
+export function circuitToPrompt(
+  wires: Wire[],
+  elements: CircuitElement[],
+  /**
+   * Adds the per-wire transposition of the gate list. Only optimize turns ask for it: it
+   * roughly doubles the circuit's share of the snapshot, and it is the one intent that has
+   * to reason about consecutive gates on a single wire — which the execution-order list
+   * cannot show once independent gates are scheduled together.
+   */
+  perWire = false,
+): string {
+  const encoded = encodeCircuit(wires, elements);
+  if (elements.length === 0) return encoded;
+
+  const metrics = `gates=${elements.length} depth=${circuitDepth(elements)}`;
+  if (!perWire) return `${encoded}\n${metrics}`;
+  return `${encoded}\nBy wire:\n${encodeByWire(wires, elements)}\n${metrics}`;
 }
 
 function fmtComplex(c: { re: number; im: number }): string {

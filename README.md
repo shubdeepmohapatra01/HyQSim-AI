@@ -60,11 +60,82 @@ HyQSim's own simulator, and asking it to explain a circuit cannot cause it to mo
 - **The AI never computes physics** - Every number it reports comes from HyQSim's own simulator. For a results question it triggers a real simulation run and waits, rather than guessing
 - **Two ways to connect** - The in-app chat panel (bring an API key; Groq's free tier works), or **MCP** so Claude Desktop / Claude Code drives the canvas on your existing subscription with no API tokens at all
 - **Read-only requests are enforced** - Asking for an explanation cannot modify your circuit; mutating tools are refused outright
+- **Circuit optimization** - "Optimize this circuit" rewrites it in place for fewer gates and less depth, then re-simulates to check the state did not move. One-click **Revert** puts the original back
 - **Wigner-aware** - Plots are summarised as physical features (negativity volume, fringe count and spacing, quadrature variances) rather than 6400 raw floats
 - **Verified circuits over improvisation** - For known constructions (cat state, CV↔DV transfer) the assistant loads the repository's verified circuit rather than reconstructing it from memory, which language models do badly
 - **Token-efficient** - 76% fewer input tokens and under a third of the API round-trips versus the previous design; building a 4-qubit GHZ went from 10 round-trips to 2. Measure it yourself with `npm run ai:budget`
 - **Multi-provider support** - Groq (free), Google Gemini (free), OpenAI, Anthropic Claude, Mistral, Together AI; bring your own key or use a server-side one
 - **Resilient tool calling** - Fallback parser recovers tool calls from models that emit pseudo-XML as text; gate-name aliases and `pi/2`-style parameters are accepted; exponential backoff handles rate limits
+
+## Prompt Glossary
+
+The words you use decide what the assistant is *allowed* to do before anything is sent to the
+model. Every message is classified into one of four intents, and the intent fixes both the
+tool set the model is offered and whether the simulator runs. Getting the verb right is the
+difference between the assistant changing your circuit and merely talking about it.
+
+| Intent | Say this | What happens | Simulator |
+|---|---|---|---|
+| **build** | **build, create, make, construct, generate, prepare, implement, add, place, insert, put, append, remove, delete, drop, clear, reset, erase, modify, change, replace, set, update, edit, swap, rename, move, rewire** | Places or edits gates on the canvas. A tool call is *required* — the assistant cannot answer with a description instead | No |
+| **optimize** | **optimize, optimise, simplify, shorten, shallower, minimize, compress, condense, streamline, refactor, parallelize, tighten, cut down**, or the phrases **"fewer gates", "gate count", "circuit depth", "reduce depth", "more efficient", "clean it up"** | Rewrites the whole circuit for fewer gates and less depth, keeping the same final state, and reports before/after numbers. Revertible in one click | Yes — before, to capture the state it must preserve, and again after |
+| **analyze** | **analyze, evaluate, predict, simulate, run it, what output, what result, what happens, measure, distribution, histogram, counts, probability, amplitude, expectation, wigner, negativity, fock, photon number, squeez…, bloch, entangle…, fidelity, purity, phase space, quadrature, ⟨n⟩** | Answers questions about the results. **Cannot touch the canvas** | Yes, if there are no current results |
+| **explain** | **explain, describe, why, how does, how do, what is, what are, what does, interpret, walk me through, summarize, tell me about, meaning, purpose** | Describes what the circuit is and does, from its structure. **Cannot touch the canvas** | No |
+
+Matching is on word boundaries with any suffix, so *"optimizing"*, *"adding"* and
+*"squeezed"* all count.
+
+**Precedence**, when a message hits more than one list:
+
+1. **optimize** wins first — *"rewrite this with fewer gates"* contains a build verb but is an
+   optimization, and the optimize rules are the ones that answer it well.
+2. then **build** — *"add a squeeze gate and tell me the photon number"* adds the gate; the
+   change is the part that must not be skipped.
+3. then **analyze** over **explain** — answering a results question without numbers is useless.
+4. Unrecognised phrasing falls back to **explain**. Guessing "build" would let a misread
+   question wipe your canvas.
+
+Examples:
+
+| Prompt | Intent | Result |
+|---|---|---|
+| `Build a 5 qubit GHZ circuit` | build | 5 wires, H then a chain of 4 CNOTs |
+| `Add a squeeze gate to m0` | build | One gate appended |
+| `Can you optimize the circuit?` | optimize | Cancels inverse pairs, merges same-axis rotations, repacks columns; reports gates and depth before vs after |
+| `Make this shallower` | optimize | Same, aimed at depth rather than gate count |
+| `What output will this give?` | analyze | Runs the simulator, answers from the real numbers |
+| `Explain this circuit` | explain | Names the state and says why the circuit produces it |
+
+A circuit's **depth** is how many steps it takes, not how many gates it has: gates that share
+no wire run at the same step. `h q0; h q1; h q2` is three gates at depth 1.
+
+Depth is often where the only win is, since many circuits need a fixed number of gates. Two
+things reduce it, and neither is circuit-specific:
+
+- **Fewer gates on the critical path** — cancelling neighbouring inverses, merging repeated
+  same-axis operations on one wire, dropping anything that comes to identity.
+- **A shorter critical path for the same result** — where a circuit extends one wire's state
+  onto fresh wires one at a time, every wire that already carries it can extend to a new one
+  in the same step: a balanced tree instead of a line, *k* steps down to about log₂*k*.
+
+Reordering is *not* one of them — HyQSim schedules independent gates in parallel
+automatically, whatever order they were written in, so the assistant only has to change the
+dependency structure.
+
+An 8-qubit GHZ makes the second point concrete. It needs 8 gates however you build it:
+
+| Construction | Gates | Depth |
+|---|---|---|
+| CNOT chain `q0→q1→q2→…` | 8 | **8** — each CNOT waits on the wire the last one wrote |
+| Fan-out, every CNOT from `q0` | 8 | **8** — they share the control, so they still serialize |
+| Doubling tree | 8 | **4** — 1+⌈log₂n⌉ |
+
+The canvas may still draw a shallow circuit in more columns than its depth: two gates that
+run in the same step can have crossing connectors, which cannot share a column without
+overlapping.
+
+These lists live in `frontend/src/ai/intent.ts` and are asserted by `npm run ai:replay`, so
+this table cannot silently drift from the code. Full treatment, including prompt examples per
+provider and the HQC notation: **[AI_GUIDE.md](AI_GUIDE.md)**.
 
 ## Quick Start
 
@@ -267,8 +338,8 @@ Open the chat panel below the canvas, select a model, paste your key, and start 
 
 | Provider | Free Tier | Where to get a key |
 |----------|-----------|-------------------|
-| **Groq** (Llama 70B) | Yes — no credit card | [console.groq.com](https://console.groq.com) |
-| **Google Gemini 2.0 Flash** | Yes — largest free budget | [aistudio.google.com](https://aistudio.google.com) |
+| **Groq** (GPT-OSS 120B) | Yes — no credit card | [console.groq.com](https://console.groq.com) |
+| **Google Gemini Flash** | Yes — largest free budget | [aistudio.google.com](https://aistudio.google.com) |
 | **Anthropic Claude** | No | [console.anthropic.com](https://console.anthropic.com) |
 | **OpenAI** | No | [platform.openai.com](https://platform.openai.com) |
 | **Mistral** | No | [console.mistral.ai](https://console.mistral.ai) |
@@ -323,7 +394,7 @@ GOOGLE_API_KEY=... npm run ai:models -- --verify   # which models the key can ac
 GROQ_API_KEY=...   npm run ai:probe                # which request features a provider accepts
 GROQ_API_KEY=...   npm run ai:live                 # the real prompt suite → ai-eval-report.md
 GROQ_API_KEY=... GOOGLE_API_KEY=... \
-  npm run ai:live -- --compare llama-3.3-70b-versatile,gemini-3.6-flash
+  npm run ai:live -- --compare openai/gpt-oss-120b,gemini-3.6-flash
 ```
 
 `ai:models --verify` is the first thing to run when a model starts returning 404 — providers

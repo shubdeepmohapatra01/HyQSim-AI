@@ -7,6 +7,7 @@ import {
   resolveElementRef,
   encodeGateReference,
   availableWireLabels,
+  packColumns,
 } from './hqc';
 
 /**
@@ -39,7 +40,7 @@ start in VACUUM unless the user asks for a Fock/number state. A coherent amplitu
 1. If "Known circuits" covers the request, call load_benchmark. Do NOT rebuild those from
    memory — their exact gate sequences are longer than you expect and you will get them wrong.
 2. Otherwise call build_circuit ONCE with the whole circuit. Never add gates one at a time.
-3. To EDIT, use add_gate / remove_gate / add_wire. Do not rebuild.
+3. To EDIT, use add_gate / remove_gate / add_wire. Do not rebuild — except when optimizing.
 4. NEVER state a number absent from [Simulation:]. You do not compute physics; HyQSim does.
 5. A "CHECK:" line in a tool result means the circuit is likely wrong. Fix it before replying.
 6. Tool calls go through the tool interface only, never as text or XML.
@@ -51,6 +52,52 @@ ${encodeBenchmarkReference()}
 Lane signature in brackets. "!py" = browser backend only, not bosonic-qiskit.
 ${encodeGateReference()}
 Order: cnot control>target; bs qumode>qumode; cdisp/xcdisp/ycdisp/cr/jc ALWAYS qubit>qumode.`;
+
+/**
+ * Optimize-only. Sent on top of BUILD_RULES, because an optimizer needs the gate catalogue
+ * and the HQC syntax just as much as a builder does.
+ *
+ * There is no automatic equivalence check behind this — HyQSim applies whatever the model
+ * proposes — so the rules are written to make the model conservative and to make it verify
+ * its own work with the real simulator rather than by reasoning.
+ */
+const OPTIMIZE_RULES = `## Optimizing
+The user wants the SAME final state from a cheaper circuit. [Canvas:] reports both measures:
+"gates" (how many) and "depth" (how many steps). Gates sharing NO wire run in the same step;
+a gate holds every wire it acts on for the whole step, so two gates sharing even one wire run
+in different steps however symmetric they look.
+1. Rewrite the whole circuit with build_circuit (replace=true). This is the one case where
+   rebuilding beats add_gate / remove_gate.
+2. READ EACH WIRE SEPARATELY FIRST. The gate list is in execution order across all wires, so
+   a pair on one wire is usually NOT adjacent in it: "#1 h q0; #2 x q1; #3 h q0; #4 x q1" is
+   h,h on q0 and x,x on q1. Write out each wire's own sequence before judging anything.
+3. HyQSim already schedules independent gates in parallel, so REORDERING GAINS NOTHING. Depth
+   is the longest run of gates that each wait on the one before, and only two things shorten
+   it. Apply them only where you are certain:
+   - fewer gates on that run, judged per wire:
+     * a gate that is its own inverse, twice in a row on the same wires, is the identity:
+       BOTH GATES DISAPPEAR, none is left behind. h,h -> nothing. x,x -> nothing. Likewise
+       y,y  z,z  cnot,cnot on the same control and target. So does an inverse pair, s,sdg.
+     * only PARAMETERISED gates merge, and merging adds their parameters: rz a; rz b -> rz a+b
+       on one wire; rotate a; rotate b -> rotate a+b on one mode. A gate with no parameters
+       has nothing to add, so it never "merges" — it either cancels or stays.
+     * drop anything that comes to identity: a rotation of 0, a displacement of 0.
+     Cancelling can empty a wire, or the whole circuit. That is a correct answer, not a
+     mistake: call build_circuit with the wires and gates:"".
+   - a shorter run for the same result: where the circuit extends one wire's state onto fresh
+     wires one at a time, every wire that already carries it can extend to a new one in the
+     same step — a balanced tree instead of a line, turning k steps into about log2(k). Read
+     what each gate actually waits for and rebalance that; the point is the dependency
+     structure, not any particular circuit. Operations stacked on the same wire, or sharing
+     one control, cannot be spread this way.
+   Never drop a gate you cannot justify. Two gates commute only if they share no wire.
+4. If nothing safe is available, change nothing and say the circuit is already minimal.
+   A wrong circuit is much worse than an unoptimized one.
+5. After rewriting, call run_simulation and compare it against the [Simulation:] block from
+   before the rewrite. If any amplitude, Bloch vector or <n> moved, your rewrite was WRONG:
+   call build_circuit again with the original gates and tell the user it did not work.
+6. Close by reporting gates and depth before vs after, and naming each rewrite you applied.
+   Your claims must match the tool result: if it says gates=1 you did not remove four gates.`;
 
 /** Read-only: the rules that still apply when the model may not touch the canvas. */
 const READONLY_RULES = `## Rules
@@ -66,11 +113,15 @@ evidence: Fock shape, <n>, Bloch vector, Wigner summary (neg = negativity volume
 fringes, varX/varP against vacuum 1.00). Say why the circuit produces it. One physicist to
 another: precise, intuitive, not pedantic. Under 200 words unless asked for more.`;
 
-export type PromptIntent = 'build' | 'explain' | 'analyze';
+export type PromptIntent = 'build' | 'optimize' | 'explain' | 'analyze';
+
+/** The intents allowed to change the canvas. ChatPanel's tool guard reads this. */
+export const MUTATING_INTENTS = new Set<PromptIntent>(['build', 'optimize']);
 
 export function buildSystemPrompt(intent: PromptIntent): string {
-  const parts = intent === 'build'
-    ? [HEADER, NOTATION, BUILD_RULES, EXPLAINING]
+  const parts =
+    intent === 'optimize' ? [HEADER, NOTATION, BUILD_RULES, OPTIMIZE_RULES, EXPLAINING]
+    : intent === 'build' ? [HEADER, NOTATION, BUILD_RULES, EXPLAINING]
     : [HEADER, NOTATION, READONLY_RULES, EXPLAINING];
   return parts.join('\n\n');
 }
@@ -166,7 +217,7 @@ export const MUTATING_TOOLS = new Set(['build_circuit', 'load_benchmark', 'add_g
  * less often.
  */
 export function toolsForIntent(intent: PromptIntent): typeof AI_TOOLS {
-  if (intent === 'build') return AI_TOOLS;
+  if (MUTATING_INTENTS.has(intent)) return AI_TOOLS;
   return AI_TOOLS.filter(t => !MUTATING_TOOLS.has(t.name));
 }
 
@@ -269,11 +320,13 @@ export function parseToolCall(
         return { mutation: null, error: gateErrors.join(' ') };
       }
 
+      // Packed here rather than inside decodeGates: when extending, the new gates have to be
+      // scheduled against the ones already on the canvas, so the whole list is the unit.
       return {
         mutation: {
           type: 'build_circuit',
           wires: baseWires,
-          elements: replace ? newElements : [...baseElements, ...newElements],
+          elements: packColumns(replace ? newElements : [...baseElements, ...newElements]),
           replace,
         },
         error: null,

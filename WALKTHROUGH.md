@@ -184,7 +184,7 @@ Everything above can be driven by describing what you want.
 
 Get a free API key from [console.groq.com](https://console.groq.com) — no credit card.
 
-Open the **AI Assistant** bar at the bottom, choose **Llama 3.3 70B (Groq)**, paste the key.
+Open the **AI Assistant** bar at the bottom, choose **GPT-OSS 120B (Groq, free)**, paste the key.
 
 ![the AI panel expanded](docs/images/10-ai-panel-setup.png)
 

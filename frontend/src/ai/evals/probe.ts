@@ -11,10 +11,10 @@
  *
  * Usage:
  *   GOOGLE_API_KEY=... npm run ai:probe -- --model gemini-3.6-flash
- *   GROQ_API_KEY=...   npm run ai:probe -- --model llama-3.3-70b-versatile
+ *   GROQ_API_KEY=...   npm run ai:probe -- --model openai/gpt-oss-120b
  */
 
-import { MODEL_OPTIONS } from '../providers';
+import { MODEL_OPTIONS, providerForModel } from '../providers';
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -32,15 +32,7 @@ const KEY_ENV: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', groq: 'GROQ_API_KEY',
   google: 'GOOGLE_API_KEY', mistral: 'MISTRAL_API_KEY', together: 'TOGETHER_API_KEY',
 };
-function providerOf(id: string): string {
-  if (id.startsWith('claude-')) return 'anthropic';
-  if (id.startsWith('llama-') || id.startsWith('mixtral-') || id.startsWith('gemma-')) return 'groq';
-  if (id.startsWith('gemini-')) return 'google';
-  if (id.startsWith('mistral-') || id.startsWith('codestral-')) return 'mistral';
-  if (id.startsWith('meta-llama/')) return 'together';
-  return 'openai';
-}
-const envVar = KEY_ENV[providerOf(modelId)];
+const envVar = KEY_ENV[providerForModel(modelId) ?? 'openai'];
 const apiKey = process.env[envVar] ?? '';
 if (!apiKey) {
   console.error(`No API key. Set ${envVar} in your environment.`);
