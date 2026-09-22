@@ -260,11 +260,25 @@ export const HYBRID_GATES: Gate[] = [
     name: 'Jaynes-Cummings',
     symbol: 'JC',
     category: 'hybrid',
-    description: 'Jaynes-Cummings coupling e^{-iθ(σ₊a + σ₋a†)}: entangles qubit with qumode via photon exchange',
+    description: 'Jaynes-Cummings (red sideband) e^{-iθ(e^{iφ}σ₋a† + e^{-iφ}σ₊a)}: exchanges a photon with the qubit excitation',
     numQubits: 1,
     numQumodes: 1,
     parameters: [
       { name: 'theta', symbol: 'θ', defaultValue: Math.PI / 4, min: -Math.PI, max: Math.PI, step: 0.1, unit: 'rad' },
+      { name: 'phi', symbol: 'φ', defaultValue: 0, min: 0, max: 2 * Math.PI, step: 0.1, unit: 'rad' },
+    ],
+  },
+  {
+    id: 'ajc',
+    name: 'Anti-Jaynes-Cummings',
+    symbol: 'AJC',
+    category: 'hybrid',
+    description: 'Anti-Jaynes-Cummings (blue sideband) e^{-iθ(e^{iφ}σ₊a† + e^{-iφ}σ₋a)}: creates a photon and a qubit excitation together',
+    numQubits: 1,
+    numQumodes: 1,
+    parameters: [
+      { name: 'theta', symbol: 'θ', defaultValue: Math.PI / 4, min: -Math.PI, max: Math.PI, step: 0.1, unit: 'rad' },
+      { name: 'phi', symbol: 'φ', defaultValue: 0, min: 0, max: 2 * Math.PI, step: 0.1, unit: 'rad' },
     ],
   },
   // Commented out for now:

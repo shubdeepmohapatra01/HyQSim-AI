@@ -59,6 +59,14 @@ const HQML_IMPORT_MAP: Record<string, HLImportMapping> = {
   'CD':                      { gateId: 'cdisp', wire: 'hybrid', hyqsimParams: ['alpha_re', 'alpha_im'], numParams: 2, polarToCartesian: true },
   'ConditionalRotation':     { gateId: 'cr',    wire: 'hybrid', hyqsimParams: ['theta'], numParams: 1 },
   'CR':                      { gateId: 'cr',    wire: 'hybrid', hyqsimParams: ['theta'], numParams: 1 },
+  'ConditionalXDisplacement': { gateId: 'xcdisp', wire: 'hybrid', hyqsimParams: ['alpha_re', 'alpha_im'], numParams: 2, polarToCartesian: true },
+  'XCD':                      { gateId: 'xcdisp', wire: 'hybrid', hyqsimParams: ['alpha_re', 'alpha_im'], numParams: 2, polarToCartesian: true },
+  'ConditionalYDisplacement': { gateId: 'ycdisp', wire: 'hybrid', hyqsimParams: ['alpha_re', 'alpha_im'], numParams: 2, polarToCartesian: true },
+  'YCD':                      { gateId: 'ycdisp', wire: 'hybrid', hyqsimParams: ['alpha_re', 'alpha_im'], numParams: 2, polarToCartesian: true },
+  'JaynesCummings':           { gateId: 'jc',     wire: 'hybrid', hyqsimParams: ['theta', 'phi'], numParams: 2 },
+  'JC':                       { gateId: 'jc',     wire: 'hybrid', hyqsimParams: ['theta', 'phi'], numParams: 2 },
+  'AntiJaynesCummings':       { gateId: 'ajc',    wire: 'hybrid', hyqsimParams: ['theta', 'phi'], numParams: 2 },
+  'AJC':                      { gateId: 'ajc',    wire: 'hybrid', hyqsimParams: ['theta', 'phi'], numParams: 2 },
 };
 
 // Export mapping: HyQSim gate ID → hybridlane code generation info
@@ -89,6 +97,10 @@ const HL_EXPORT_MAP: Record<string, HLExportMapping> = {
   kerr:     { prefix: 'hqml', method: 'Kerr',          wire: 'qumode',  paramFormat: 'kappa' },
   cdisp:    { prefix: 'hqml', method: 'ConditionalDisplacement', wire: 'hybrid', paramFormat: 'displacement' },
   cr:       { prefix: 'hqml', method: 'ConditionalRotation',     wire: 'hybrid', paramFormat: 'theta' },
+  xcdisp:   { prefix: 'hqml', method: 'ConditionalXDisplacement', wire: 'hybrid', paramFormat: 'displacement' },
+  ycdisp:   { prefix: 'hqml', method: 'ConditionalYDisplacement', wire: 'hybrid', paramFormat: 'displacement' },
+  jc:       { prefix: 'hqml', method: 'JaynesCummings',           wire: 'hybrid', paramFormat: 'two_angle' },
+  ajc:      { prefix: 'hqml', method: 'AntiJaynesCummings',       wire: 'hybrid', paramFormat: 'two_angle' },
 };
 
 const GATE_X_SPACING = 60;

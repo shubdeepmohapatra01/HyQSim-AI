@@ -329,11 +329,11 @@ export function yConditionalDisplacementMatrix(alpha: Complex, fockDim: number):
   return result;
 }
 
-// Build Jaynes-Cummings coupling matrix
-// U = exp(-i*theta*(sigma_+ a + sigma_- a†))
+// Build Jaynes-Cummings (red sideband) coupling matrix
+// U = exp(-i·θ·(e^{iφ}σ₋a† + e^{-iφ}σ₊a))   [hybridlane JaynesCummings convention]
 // Couples |g,n⟩ ↔ |e,n-1⟩ within each excitation subspace.
 // Basis: |qubit, fock⟩ = qubit*fockDim + fock  (qubit 0=ground, 1=excited)
-export function jaynesCouplingMatrix(theta: number, fockDim: number): Matrix {
+export function jaynesCouplingMatrix(theta: number, phi: number, fockDim: number): Matrix {
   const dim = 2 * fockDim;
   const result: Matrix = [];
   for (let i = 0; i < dim; i++) {
@@ -344,23 +344,59 @@ export function jaynesCouplingMatrix(theta: number, fockDim: number): Matrix {
   result[0][0] = ONE;
 
   // For n = 1..fockDim-1: invariant subspace {|g,n⟩, |e,n-1⟩}
-  // Generator restricted to subspace: G_n = sqrt(n) * sigma_x
-  // => U_n = [[cos(θ√n), -i·sin(θ√n)], [-i·sin(θ√n), cos(θ√n)]]
+  // Generator restricted to subspace: G_n = θ√n [[0, e^{iφ}], [e^{-iφ}, 0]]
+  // => U_n = cos(θ√n)·I - i·sin(θ√n)·[[0, e^{iφ}], [e^{-iφ}, 0]]
   for (let n = 1; n < fockDim; n++) {
-    const gn  = n;              // index of |g,n⟩
+    const gn  = n;               // index of |g,n⟩
     const en1 = fockDim + n - 1; // index of |e,n-1⟩
     const c = Math.cos(theta * Math.sqrt(n));
     const s = Math.sin(theta * Math.sqrt(n));
 
     result[gn][gn]   = { re: c, im: 0 };
-    result[en1][gn]  = { re: 0, im: -s };
-    result[gn][en1]  = { re: 0, im: -s };
     result[en1][en1] = { re: c, im: 0 };
+    // ⟨g,n|U|e,n-1⟩ = -i·sin(θ√n)·e^{iφ}, with the conjugate transpose partner
+    result[gn][en1]  = { re:  s * Math.sin(phi), im: -s * Math.cos(phi) };
+    result[en1][gn]  = { re: -s * Math.sin(phi), im: -s * Math.cos(phi) };
   }
 
   // |e,fockDim-1⟩ (index 2*fockDim-1): partner |g,fockDim⟩ is outside truncation
   // Approximate as fixed (truncation artefact is negligible for fockDim >> mean photon number)
   result[dim - 1][dim - 1] = ONE;
+
+  return result;
+}
+
+// Build anti-Jaynes-Cummings (blue sideband) coupling matrix
+// U = exp(-i·θ·(e^{iφ}σ₊a† + e^{-iφ}σ₋a))   [hybridlane AntiJaynesCummings convention]
+// Couples |g,n⟩ ↔ |e,n+1⟩: a photon and the qubit excitation are created together.
+// Basis: |qubit, fock⟩ = qubit*fockDim + fock  (qubit 0=ground, 1=excited)
+export function antiJaynesCummingsMatrix(theta: number, phi: number, fockDim: number): Matrix {
+  const dim = 2 * fockDim;
+  const result: Matrix = [];
+  for (let i = 0; i < dim; i++) {
+    result[i] = new Array(dim).fill(ZERO);
+  }
+
+  // |e,0⟩ is decoupled — its partner |g,-1⟩ does not exist
+  result[fockDim][fockDim] = ONE;
+
+  // For n = 0..fockDim-2: invariant subspace {|g,n⟩, |e,n+1⟩}
+  // Generator restricted to subspace: G_n = θ√(n+1) [[0, e^{-iφ}], [e^{iφ}, 0]]
+  for (let n = 0; n < fockDim - 1; n++) {
+    const gn  = n;               // index of |g,n⟩
+    const en1 = fockDim + n + 1; // index of |e,n+1⟩
+    const c = Math.cos(theta * Math.sqrt(n + 1));
+    const s = Math.sin(theta * Math.sqrt(n + 1));
+
+    result[gn][gn]   = { re: c, im: 0 };
+    result[en1][en1] = { re: c, im: 0 };
+    // ⟨g,n|U|e,n+1⟩ = -i·sin(θ√(n+1))·e^{-iφ}, with the conjugate transpose partner
+    result[gn][en1]  = { re: -s * Math.sin(phi), im: -s * Math.cos(phi) };
+    result[en1][gn]  = { re:  s * Math.sin(phi), im: -s * Math.cos(phi) };
+  }
+
+  // |g,fockDim-1⟩: partner |e,fockDim⟩ is outside truncation — held fixed
+  result[fockDim - 1][fockDim - 1] = ONE;
 
   return result;
 }
@@ -656,7 +692,11 @@ export function applyHybridGate(
       break;
     }
     case 'jc': {
-      gate = jaynesCouplingMatrix(params.theta ?? Math.PI / 4, fockDim);
+      gate = jaynesCouplingMatrix(params.theta ?? Math.PI / 4, params.phi ?? 0, fockDim);
+      break;
+    }
+    case 'ajc': {
+      gate = antiJaynesCummingsMatrix(params.theta ?? Math.PI / 4, params.phi ?? 0, fockDim);
       break;
     }
     default:

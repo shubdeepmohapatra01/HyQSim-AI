@@ -40,7 +40,8 @@ export const GATE_ALIASES: Record<string, string> = {
   cd: 'cdisp', conditional_displacement: 'cdisp', zcd: 'cdisp',
   xcd: 'xcdisp', ycd: 'ycdisp',
   conditional_rotation: 'cr', crot: 'cr',
-  jaynes_cummings: 'jc',
+  jaynes_cummings: 'jc', red_sideband: 'jc',
+  anti_jaynes_cummings: 'ajc', antijaynes_cummings: 'ajc', blue_sideband: 'ajc',
   m: 'measure', meas: 'measure',
 };
 
@@ -492,7 +493,7 @@ export function encodeGateReference(): string {
 export const PYTHON_BACKEND_GATES = new Set([
   'h', 'x', 'y', 'z', 's', 'sdg', 't', 'rx', 'ry', 'rz', 'cnot',
   'displace', 'squeeze', 'rotate', 'bs', 'kerr',
-  'cdisp', 'cr',
+  'cdisp', 'xcdisp', 'ycdisp', 'cr', 'jc', 'ajc',
   'measure',
 ]);
 

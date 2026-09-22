@@ -34,7 +34,7 @@ from .models import (
 # Gates available in bosonic-qiskit
 SUPPORTED_QUMODE_GATES = {'displace', 'squeeze', 'rotate', 'bs', 'kerr', 'annihilate', 'create'}
 SUPPORTED_QUBIT_GATES = {'h', 'x', 'y', 'z', 's', 'sdg', 't', 'rx', 'ry', 'rz', 'cnot'}
-SUPPORTED_HYBRID_GATES = {'cdisp', 'cr', 'snap', 'ecd'}
+SUPPORTED_HYBRID_GATES = {'cdisp', 'xcdisp', 'ycdisp', 'cr', 'jc', 'ajc', 'snap', 'ecd'}
 
 
 def is_power_of_two(n: int) -> bool:
@@ -135,6 +135,56 @@ def apply_post_selection(
         return statevector
 
     return Statevector(sv_array)
+
+
+def sample_bitstring_counts(
+    statevector: Statevector,
+    circuit: CVCircuit,
+    wire_to_qubit_idx: dict[int, int],
+    shots: int
+) -> dict[str, int] | None:
+    """
+    Sample qubit measurement outcomes from a statevector.
+
+    Counts are drawn from the state as it stands, so passing a post-selected
+    statevector yields post-selected counts. This is also why the counts are
+    sampled here rather than by appending measurements to the circuit: a
+    measured circuit collapses the state before it can be projected, and the
+    counts would then ignore the post-selection entirely.
+
+    Bit ordering matches the qubit wire order: the leftmost character of each
+    bitstring is the first qubit wire.
+
+    Returns:
+        Mapping from bitstring to shot count, or None if there are no qubits.
+    """
+    num_qubits = len(wire_to_qubit_idx)
+    if num_qubits == 0 or shots <= 0:
+        return None
+
+    # Qumode qubits come first in the circuit, then the qubit register
+    num_qumode_qubits = len(circuit.qubits) - num_qubits
+    qubit_positions = [num_qumode_qubits + i for i in sorted(wire_to_qubit_idx.values())]
+
+    amplitudes2 = np.abs(np.asarray(statevector.data)) ** 2
+    indices = np.arange(len(amplitudes2))
+
+    # Fold the full-system index down to a qubit-only bitstring index
+    keys = np.zeros(len(amplitudes2), dtype=np.int64)
+    for slot, position in enumerate(qubit_positions):
+        keys |= ((indices >> position) & 1) << (num_qubits - 1 - slot)
+
+    probs = np.bincount(keys, weights=amplitudes2, minlength=2 ** num_qubits)
+    total = probs.sum()
+    if total <= 1e-12:
+        return None
+
+    draws = np.random.default_rng().multinomial(shots, probs / total)
+    return {
+        format(k, f"0{num_qubits}b"): int(count)
+        for k, count in enumerate(draws)
+        if count > 0
+    }
 
 
 def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
@@ -349,6 +399,38 @@ def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
                         alpha = complex(params.get("alpha_re", 1), params.get("alpha_im", 0))
                         circuit.cv_c_d(alpha, qumode, qubit)
 
+                    elif gate_id == "xcdisp":
+                        # x-conditional displacement: xCD(alpha) = H . CD(alpha) . H
+                        alpha = complex(params.get("alpha_re", 1), params.get("alpha_im", 0))
+                        circuit.h(qubit)
+                        circuit.cv_c_d(alpha, qumode, qubit)
+                        circuit.h(qubit)
+
+                    elif gate_id == "ycdisp":
+                        # y-conditional displacement: yCD(alpha) = V . CD(alpha) . V^dag, V = S.H
+                        alpha = complex(params.get("alpha_re", 1), params.get("alpha_im", 0))
+                        circuit.sdg(qubit)
+                        circuit.h(qubit)
+                        circuit.cv_c_d(alpha, qumode, qubit)
+                        circuit.h(qubit)
+                        circuit.s(qubit)
+
+                    # NOTE: bosonic-qiskit defines SPLUS = (X + iY)/2, i.e. it raises
+                    # into |0>, treating |0> as the excited state. HyQSim and
+                    # hybridlane use |0> = ground, so their cv_jc/cv_ajc are swapped
+                    # relative to ours (the phase convention is otherwise identical).
+                    elif gate_id == "jc":
+                        # Jaynes-Cummings (red sideband)
+                        theta = params.get("theta", np.pi / 4)
+                        phi = params.get("phi", 0.0)
+                        circuit.cv_ajc(theta, phi, qumode, qubit)
+
+                    elif gate_id == "ajc":
+                        # Anti-Jaynes-Cummings (blue sideband)
+                        theta = params.get("theta", np.pi / 4)
+                        phi = params.get("phi", 0.0)
+                        circuit.cv_jc(theta, phi, qumode, qubit)
+
                     elif gate_id == "cr":
                         # Controlled rotation (dispersive interaction)
                         theta = params.get("theta", np.pi / 4)
@@ -365,26 +447,16 @@ def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
                         theta = params.get("theta", np.pi)
                         circuit.cv_snap(theta, n, qumode, qubit)
 
-        # Add qubit measurements for bitstring counts (reversed bit ordering)
-        if num_qubits > 0 and qbr is not None:
-            from qiskit import ClassicalRegister
-            cr = ClassicalRegister(num_qubits, name="cr")
-            circuit.add_register(cr)
-            for i in range(num_qubits):
-                circuit.measure(qbr[i], cr[-(i + 1)])
+        # Simulate the state. Qubit measurements are deliberately NOT part of this
+        # run: measuring collapses the state before the statevector is saved,
+        # which destroys every qubit coherence and leaves <sigma_x> = <sigma_y> = 0.
+        # Bitstring counts are sampled from the statevector further below, once
+        # any post-selection has been applied.
+        statevector, _result, _fockcounts = simulate(
+            circuit, shots=1, add_save_statevector=True
+        )
 
-        # Simulate
-        statevector, result, fockcounts = simulate(circuit, shots=request.shots, add_save_statevector=True)
-
-        # Extract bitstring measurement counts
         bitstring_counts = None
-        if result is not None:
-            try:
-                counts = result.get_counts()
-                if counts:
-                    bitstring_counts = {k: int(v) for k, v in counts.items()}
-            except Exception:
-                pass
 
         # Extract states
         qubit_states = {}
@@ -397,6 +469,11 @@ def run_bosonic_simulation(request: SimulationRequest) -> SimulationResponse:
                     statevector, circuit, request.postSelections,
                     wire_to_qubit_idx, num_qubits_per_qumode
                 )
+
+            # Sample measurement outcomes from the (post-selected) state
+            bitstring_counts = sample_bitstring_counts(
+                statevector, circuit, wire_to_qubit_idx, request.shots
+            )
 
             # Extract qumode states
             qumode_states = extract_qumode_states_from_statevector(

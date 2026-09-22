@@ -231,7 +231,7 @@
           "defaultValue": 0
         }
       ],
-      "pythonBackend": false
+      "pythonBackend": true
     },
     {
       "id": "ycdisp",
@@ -249,7 +249,7 @@
           "defaultValue": 0
         }
       ],
-      "pythonBackend": false
+      "pythonBackend": true
     },
     {
       "id": "cr",
@@ -275,9 +275,31 @@
         {
           "name": "theta",
           "defaultValue": 0.7853981633974483
+        },
+        {
+          "name": "phi",
+          "defaultValue": 0
         }
       ],
-      "pythonBackend": false
+      "pythonBackend": true
+    },
+    {
+      "id": "ajc",
+      "name": "Anti-Jaynes-Cummings",
+      "category": "hybrid",
+      "numQubits": 1,
+      "numQumodes": 1,
+      "parameters": [
+        {
+          "name": "theta",
+          "defaultValue": 0.7853981633974483
+        },
+        {
+          "name": "phi",
+          "defaultValue": 0
+        }
+      ],
+      "pythonBackend": true
     },
     {
       "id": "custom_cv",
@@ -354,6 +376,10 @@
     "conditional_rotation": "cr",
     "crot": "cr",
     "jaynes_cummings": "jc",
+    "red_sideband": "jc",
+    "anti_jaynes_cummings": "ajc",
+    "antijaynes_cummings": "ajc",
+    "blue_sideband": "ajc",
     "m": "measure",
     "meas": "measure"
   }

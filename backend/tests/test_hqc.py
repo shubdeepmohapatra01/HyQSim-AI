@@ -130,11 +130,20 @@ def test_gates_are_ordered_left_to_right():
 
 
 def test_python_backend_gap_is_reported():
-    _wires, elements, _ = decode_circuit("W q0 m0\nG jc q0>m0 pi/4")
-    assert unsupported_on_python_backend(elements) == ["jc"]
+    # The custom generator gates are browser-only: the bosonic-qiskit backend has no
+    # equivalent, so they are the standing example of a real backend gap.
+    _wires, elements, _ = decode_circuit("W m0\nG custom_cv m0 pi/4")
+    assert unsupported_on_python_backend(elements) == ["custom_cv"]
 
     _wires, ok, _ = decode_circuit("W q0 m0\nG cdisp q0>m0 2,0")
     assert unsupported_on_python_backend(ok) == []
+
+    # The sidebands and the x/y conditional displacements gained bosonic-qiskit
+    # support alongside the browser engine, so they must no longer be reported.
+    _wires, sidebands, _ = decode_circuit(
+        "W q0 m0\nG jc q0>m0 pi/4,0; ajc q0>m0 pi/4,0; xcdisp q0>m0 1,1; ycdisp q0>m0 1,1"
+    )
+    assert unsupported_on_python_backend(sidebands) == []
 
 
 def test_errors_name_the_valid_options():
