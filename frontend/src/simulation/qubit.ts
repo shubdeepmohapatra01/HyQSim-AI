@@ -137,12 +137,12 @@ export function getBlochVector(state: StateVector): { x: number; y: number; z: n
   const [alpha, beta] = state;
 
   // |ψ⟩ = α|0⟩ + β|1⟩
-  // Bloch sphere: x = 2*Re(α*β̄), y = 2*Im(α*β̄), z = |α|² - |β|²
+  // Bloch sphere: x = 2*Re(α β̄), y = -2*Im(α β̄) = ⟨σy⟩, z = |α|² - |β|²
   const alphaBetaConj = mul(alpha, conj(beta));
 
   return {
     x: 2 * alphaBetaConj.re,
-    y: 2 * alphaBetaConj.im,
+    y: -2 * alphaBetaConj.im,
     z: abs2(alpha) - abs2(beta),
   };
 }

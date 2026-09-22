@@ -3,7 +3,7 @@
 import type { Complex, StateVector, Matrix } from './complex';
 import {
   complex, ONE, ZERO,
-  add, mul, scale, conj, abs2, fromPolar,
+  add, mul, div, scale, conj, abs2, fromPolar,
   matVecMul, normalize, identity,
 } from './complex';
 import type { QumodeState } from '../types/circuit';
@@ -149,10 +149,14 @@ function computeSqueezingMatrix(r: number, phi: number, fockDim: number): Matrix
           Math.sqrt(factorial(m) * factorial(n)) /
           (factorial(j) * factorial(p) * factorial(q) * Math.pow(2, p + q));
 
-        const muPow = Math.pow(1 / mu, j + 1);
-        const nuMuPow = Math.pow(-nu / mu, p + q);
+        // ⟨m|S(ζ)|n⟩ = √(m!n!)/√μ · Σⱼ (-ν/2μ)^p (ν*/2μ)^q / (j! p! q! μʲ)
+        // with μ = cosh r, ν = e^{iφ} sinh r, p = (m-j)/2, q = (n-j)/2.
+        // Note μ^{-(j + 1/2)} (not μ^{-(j+1)}), and the minus sign carries the
+        // exponent p alone (not p+q).
+        const muPow = Math.pow(1 / mu, j) / Math.sqrt(mu);
+        const nuMuPow = Math.pow(nu / mu, p + q) * (p % 2 === 0 ? 1 : -1);
 
-        const phase = complexPow(expIPhi, q - p);
+        const phase = complexPow(expIPhi, p - q);
         const term = scale(phase, coeff * muPow * nuMuPow);
         sum = add(sum, term);
       }
@@ -417,6 +421,8 @@ function factorial(n: number): number {
 function complexPow(z: Complex, n: number): Complex {
   if (n === 0) return ONE;
   if (n === 1) return z;
+  // Negative exponents: z^(-n) = (1/z)^n
+  if (n < 0) return complexPow(div(ONE, z), -n);
 
   let result = ONE;
   for (let i = 0; i < n; i++) {

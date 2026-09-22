@@ -477,11 +477,11 @@ export function densityMatrixToQubitState(rho: Matrix): {
   // For a 2x2 density matrix:
   // ρ = (1/2)(I + x*σx + y*σy + z*σz)
   // x = Tr(ρ*σx) = ρ01 + ρ10
-  // y = Tr(ρ*σy) = i(ρ01 - ρ10)
+  // y = Tr(ρ*σy) = i(ρ01 - ρ10) = -2·Im(ρ01)
   // z = Tr(ρ*σz) = ρ00 - ρ11
 
   const x = rho[0][1].re + rho[1][0].re;
-  const y = rho[0][1].im - rho[1][0].im;
+  const y = rho[1][0].im - rho[0][1].im;
   const z = rho[0][0].re - rho[1][1].re;
 
   // Purity = Tr(ρ²)
